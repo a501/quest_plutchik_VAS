@@ -11,26 +11,41 @@ Each subject has:
   BDI_NNN_*.csv          - BDI-II, already contains BDI_total
 
 --------------------------------------------------------------------
-CRITICAL SCALING NOTE - read before interpreting any score
+SCALING - continuous slider -> published Likert points
 --------------------------------------------------------------------
-All 11 scales were administered on a CONTINUOUS slider (slider.response
+All scales were administered on a CONTINUOUS slider (slider.response
 holds values like 1.025, 9.9583), NOT on each instrument's published
-Likert anchors (TAS-20 is normally 1-5, ASI-3 0-4, MAIA-2 0-5, etc.).
+Likert anchors (TAS-20 is 1-5, ASI-3 0-4, MAIA-2 0-5, etc.).
 
-Consequences, all of which matter for reporting:
-  * Published cutoffs / severity bands / norms DO NOT APPLY. Do not
-    report "TAS >= 61 = alexithymia" or any equivalent.
-  * Reverse scoring must use the SLIDER bounds, not the published
-    anchors: rev(x) = (slider_min + slider_max) - x.
-  * Scores are emitted as MEAN-PER-ITEM on the slider scale, not as
-    published sums, so subscales with different item counts stay
-    comparable and partial missingness degrades gracefully.
-  * For exploratory within-sample correlation (the actual use here)
-    this is all fine. It is only cross-study comparison that breaks.
+Each response is converted to the instrument's published Likert scale
+(LIKERT_ANCHORS below) BEFORE any reverse scoring or aggregation:
+
+    likert = round( a + (x - slider_min) / (slider_max - slider_min) * (b - a) )
+
+i.e. the slider is stretched linearly onto [a, b] and snapped to the
+nearest integer point (halves round up), clipped to [a, b]. This
+assumes the slider's two ends correspond to the instrument's two end
+anchors and that its points are equally spaced along the slider.
+
+After conversion:
+  * Reverse scoring uses the PUBLISHED anchors: rev(x) = (a + b) - x.
+  * Every score is emitted as MEAN-PER-ITEM on the Likert scale
+    (`value`, used in the wide file and downstream), and also as the
+    published-style SUM of items (`sum_value`, only when every item of
+    that score was answered; in questionnaire_scores_wide_sums.csv).
+  * Sums are on the published metric, but the responses were still
+    given on a slider, not on labelled response options, so treat
+    published cutoffs / norms with caution.
+
+Scales with no entry in LIKERT_ANCHORS (currently TSQ) are left on the
+continuous slider scale and reported as such.
+
+Set SCORE_ON_LIKERT = False to reproduce the old continuous scoring.
 
 SLIDER_MIN / SLIDER_MAX are auto-detected from the pooled data across
 all subjects and printed; override them below if the PsychoPy slider
-was configured with known fixed bounds.
+was configured with known fixed bounds (recommended - the conversion
+depends directly on them).
 
 --------------------------------------------------------------------
 SCORING KEYS - provenance
@@ -64,7 +79,7 @@ Anything marked "item_text" is worth a sanity check against your own
 protocol before publication.
 
 Usage:
-    python3 score_questionnaires.py
+    python3 2_score_questionnaires.py
 """
 
 import re
@@ -82,6 +97,28 @@ OUT_DIR = Path("/home/ZhangJianfeng_04/emo_study/Behav/quest/analysis")
 
 # Set to a (min, max) tuple to override auto-detection.
 SLIDER_BOUNDS_OVERRIDE = None
+
+# Convert slider responses to the published Likert points (see docstring).
+# False = old behaviour: score on the continuous slider scale.
+SCORE_ON_LIKERT = True
+
+# Published response anchors (min, max) per scale, as named in the raw
+# file's 'Scale' column. Check these against the versions you administered.
+LIKERT_ANCHORS = {
+    "TAS":    (1, 5),   # TAS-20 (Bagby et al. 1994)
+    "DERS":   (1, 5),   # DERS-36 (Gratz & Roemer 2004)
+    "FFMQ":   (1, 5),   # FFMQ-39 (Baer et al. 2006)
+    "MAIA-2": (0, 5),   # MAIA-2 (Mehling et al. 2018)
+    "ASI3":   (0, 4),   # ASI-3 (Taylor et al. 2007)
+    "CTQ":    (1, 5),   # CTQ-28 (Bernstein et al. 2003)
+    "GASP":   (1, 7),   # GASP (Cohen et al. 2011)
+    "PERS":   (1, 5),   # PERS (Becerra et al. 2019)
+    "ASQ":    (1, 5),   # Affective Style Questionnaire (Hofmann & Kashdan 2010)
+    "SCS":    (1, 5),   # Self-Compassion Scale (Neff 2003) - confirm which SCS
+    "MW":     (1, 7),   # MW-D / MW-S (Carriere et al. 2013)
+    "EAQ":    (1, 3),   # EAQ-30 (Rieffe et al. 2008)
+    # "TSQ": no published anchors known here -> left on the slider scale
+}
 
 # minimum fraction of a subscale's items a subject must have answered
 # for that subscale score to be emitted (else NaN)
@@ -246,17 +283,22 @@ def load_quest_items(csv_path):
     if missing:
         raise KeyError(f"{csv_path.name}: missing column(s) {sorted(missing)}")
 
-    d = df[df["Scale"].notna() & df["slider.response"].notna()].copy()
+    d = df[df["Scale"].notna()].copy()
     d["Scale"] = d["Scale"].astype(str).str.strip()
-    # global No -> within-scale position
+    # global No -> within-scale position. The offset is taken BEFORE
+    # dropping unanswered items, so a skipped first item does not shift
+    # every other item of that scale down by one.
     offs = d.groupby("Scale")["No"].transform("min") - 1
     d["pos"] = (d["No"] - offs).astype(int)
+    n_items_scale = d.groupby("Scale")["pos"].nunique().to_dict()
+    d = d[d["slider.response"].notna()].copy()
     d["response"] = d["slider.response"].astype(float)
     keep = ["Scale", "pos", "response", "ReverseScored", "Dimension"]
     if "English_Translation" in df.columns:
         d["English_Translation"] = d.get("English_Translation")
         keep.append("English_Translation")
     d = d[keep]
+    d.attrs["n_items_scale"] = n_items_scale
     # the in-file participant field, for cross-checking against the filename
     # kept as the RAW value: it may be non-numeric (e.g. '001b' for a
     # repeat session), so it is never blindly int()-cast - that crashed.
@@ -280,9 +322,30 @@ def detect_slider_bounds(all_items):
           f"-> using [{lo:.0f}, {hi:.0f}] for reverse scoring.")
     if hi - lo < 2:
         raise ValueError("Implausible slider range - set SLIDER_BOUNDS_OVERRIDE.")
-    print(f"    NOTE: this is a continuous slider, NOT the published "
-          f"Likert anchors. Published cutoffs do not apply.")
+    print(f"    NOTE: these bounds define the slider -> Likert conversion. "
+          f"Set SLIDER_BOUNDS_OVERRIDE if the slider's true range is known.")
+    per_scale = all_items.groupby("Scale")["response"].agg(["min", "max"])
+    print("    observed range per scale:")
+    for sc, r in per_scale.iterrows():
+        print(f"      {sc:<8s} [{r['min']:.3f}, {r['max']:.3f}]")
     return lo, hi
+
+
+def scale_bounds(scale, slider_lo, slider_hi):
+    """(lo, hi) of the scale the responses are scored on, and whether it
+    is the published Likert scale."""
+    if SCORE_ON_LIKERT and scale in LIKERT_ANCHORS:
+        a, b = LIKERT_ANCHORS[scale]
+        return float(a), float(b), True
+    return slider_lo, slider_hi, False
+
+
+def slider_to_likert(x, slider_lo, slider_hi, a, b):
+    """Map continuous slider values linearly onto [a, b] and snap to the
+    nearest integer Likert point (halves round up)."""
+    x = np.asarray(x, dtype=float)
+    scaled = a + (x - slider_lo) / (slider_hi - slider_lo) * (b - a)
+    return np.clip(np.floor(scaled + 0.5), a, b)
 
 
 # ===================================================================
@@ -346,17 +409,23 @@ def score_subject(sid, items, slider_lo, slider_hi):
         rev_items, rev_src = resolve_reverse_items(scale, g)
 
         v = g.set_index("pos")["response"].astype(float)
+        lo, hi, on_likert = scale_bounds(scale, slider_lo, slider_hi)
+        if on_likert:
+            v = pd.Series(slider_to_likert(v.values, slider_lo, slider_hi,
+                                           lo, hi), index=v.index)
+        metric = f"likert_{lo:g}-{hi:g}" if on_likert else "slider"
         v_scored = v.copy()
         for p in rev_items:
             if p in v_scored.index:
-                v_scored.loc[p] = (slider_lo + slider_hi) - v_scored.loc[p]
+                v_scored.loc[p] = (lo + hi) - v_scored.loc[p]
 
         if scale in ITEM_LEVEL_SCALES:
             for p in sorted(v_scored.index):
                 rows.append(dict(subject=sid, questionnaire=scale,
                                  score=f"{scale}_item{int(p):02d}",
                                  value=float(v_scored.loc[p]),
-                                 n_items=1, coverage=1.0,
+                                 sum_value=float(v_scored.loc[p]),
+                                 n_items=1, coverage=1.0, metric=metric,
                                  key_source="item_level",
                                  reverse_source=rev_src))
             continue
@@ -381,16 +450,26 @@ def score_subject(sid, items, slider_lo, slider_hi):
             cov = len(present) / len(item_nums) if item_nums else 0
             val = float(v_scored.loc[present].mean()) if cov >= MIN_ITEM_COVERAGE \
                 else np.nan
+            # a published-style sum is only defined when nothing is missing
+            total = float(v_scored.loc[present].sum()) if cov == 1.0 else np.nan
             rows.append(dict(subject=sid, questionnaire=scale,
                              score=f"{scale}_{sub_name}", value=val,
+                             sum_value=total,
                              n_items=len(item_nums), coverage=cov,
+                             metric=metric,
                              key_source=verified, reverse_source=rev_src))
 
         if scale not in NO_TOTAL:
+            n_expected = items.attrs.get("n_items_scale", {}).get(
+                scale, len(v_scored))
+            cov_t = len(v_scored) / n_expected if n_expected else 0
             rows.append(dict(subject=sid, questionnaire=scale,
                              score=f"{scale}_TOTAL",
                              value=float(v_scored.mean()),
-                             n_items=len(v_scored), coverage=1.0,
+                             sum_value=(float(v_scored.sum())
+                                        if cov_t == 1.0 else np.nan),
+                             n_items=n_expected, coverage=cov_t,
+                             metric=metric,
                              key_source=verified, reverse_source=rev_src))
     return rows
 
@@ -411,8 +490,8 @@ def load_bdi(path, sid):
         total = float(df[item_cols].iloc[0].sum())
         src = f"summed {len(item_cols)} item_ columns"
     return dict(subject=sid, questionnaire="BDI", score="BDI_TOTAL",
-                value=total, n_items=21, coverage=1.0,
-                key_source=src, reverse_source="n/a")
+                value=total, sum_value=total, n_items=21, coverage=1.0,
+                metric="bdi_0-3_sum", key_source=src, reverse_source="n/a")
 
 
 def audit_subject_ids(per_subject_items, subs):
@@ -671,9 +750,20 @@ def main():
     out_wide = OUT_DIR / "questionnaire_scores_wide.csv"
     wide.to_csv(out_wide)
 
+    # published-style sums (complete subscales only); kept in a separate
+    # file so downstream scripts reading the wide file see one value per score
+    wide_sums = scores.pivot_table(index="subject", columns="score",
+                                   values="sum_value")
+    out_sums = OUT_DIR / "questionnaire_scores_wide_sums.csv"
+    wide_sums.to_csv(out_sums)
+
     print(f"\n[OK] {len(scores)} score rows / {scores['score'].nunique()} "
           f"distinct scores -> {out_long}")
-    print(f"[OK] subject x score matrix -> {out_wide}")
+    print(f"[OK] subject x score matrix (mean per item) -> {out_wide}")
+    print(f"[OK] subject x score matrix (sum of items)  -> {out_sums}")
+    print("  Scoring metric per questionnaire:")
+    for q, m in scores.groupby("questionnaire")["metric"].first().items():
+        print(f"      {q:<8s} {m}")
 
     low = scores[(scores["coverage"] < 1.0) & scores["coverage"].notna()]
     if len(low):
