@@ -232,17 +232,21 @@ NO_TOTAL = {"PERS", "ASQ", "SCS", "MW", "GASP", "MAIA-2", "TSQ", "EAQ"}
 # ===================================================================
 
 def find_subject_files(quest_dir):
-    r"""Map subject_id -> {'quest': path, 'bdi': path, 'suffix': str}.
+    r"""Map subject_id -> {'quests': [paths], 'bdi': path, 'suffix': str}.
 
     Filenames may carry a letter suffix (e.g. 001b_Pysch_quest...), which
     normally marks a repeat session. A regex of ^(\d+)_ would not match
     those and would drop the subject SILENTLY, so the suffix is parsed
-    explicitly and reported. Where both a plain and a suffixed file exist
-    for one subject the LAST by filename order is used and the collision
-    is printed - it is a data-management decision, not one to make here.
+    explicitly and reported.
+
+    A subject may have SEVERAL quest files (e.g. scales added to the
+    battery later were filled in at a second, later session and saved
+    as 010_Pysch_quest_<later date>.csv). ALL of them are kept, in
+    filename (= date) order, and merged scale by scale in
+    merge_quest_files().
     """
     quest_dir = Path(quest_dir)
-    subs, suffixed, collisions = {}, [], []
+    subs, suffixed, bdi_dups = {}, [], []
     for p in sorted(quest_dir.glob("*.csv")):
         name = p.name
         m_q = re.match(r"^(\d+)([A-Za-z]*)_Pysch_quest", name, flags=re.I)
@@ -251,14 +255,14 @@ def find_subject_files(quest_dir):
             sid, suf = int(m_q.group(1)), m_q.group(2)
             if suf:
                 suffixed.append((name, sid, suf))
-            if "quest" in subs.get(sid, {}):
-                collisions.append((sid, subs[sid]["quest"].name, name))
-            subs.setdefault(sid, {})["quest"] = p
+            subs.setdefault(sid, {}).setdefault("quests", []).append(p)
             subs[sid]["suffix"] = suf
         elif m_b:
             sid, suf = int(m_b.group(1)), m_b.group(2)
             if suf:
                 suffixed.append((name, sid, suf))
+            if "bdi" in subs.get(sid, {}):
+                bdi_dups.append((sid, subs[sid]["bdi"].name, name))
             subs.setdefault(sid, {})["bdi"] = p
 
     if suffixed:
@@ -266,12 +270,54 @@ def find_subject_files(quest_dir):
               f"repeat session) - parsed, not skipped:")
         for name, sid, suf in suffixed:
             print(f"      {name}  -> subject {sid} (suffix '{suf}')")
-    if collisions:
-        print(f"  *** {len(collisions)} subject(s) have MORE THAN ONE quest "
-              f"file. The later filename is used - confirm that is right: ***")
-        for sid, a, b in collisions:
+    multi = {sid: v["quests"] for sid, v in subs.items()
+             if len(v.get("quests", [])) > 1}
+    if multi:
+        print(f"  {len(multi)} subject(s) have more than one quest file - "
+              f"all are read and merged scale by scale:")
+        for sid, ps in sorted(multi.items()):
+            print(f"      subject {sid}: " + ", ".join(p.name for p in ps))
+    if bdi_dups:
+        print(f"  *** {len(bdi_dups)} subject(s) have MORE THAN ONE BDI file. "
+              f"The later filename is used - confirm that is right: ***")
+        for sid, a, b in bdi_dups:
             print(f"      subject {sid}: {a}  vs  {b}   -> using {b}")
     return subs
+
+
+def merge_quest_files(paths):
+    """Combine one subject's quest files into a single item table.
+
+    Each SCALE is taken whole from exactly one file - items of one scale
+    are never mixed across sessions. A scale present in only one file is
+    simply taken from it. If a scale was answered in more than one file,
+    the file with the most answered items wins; on a tie the EARLIER
+    file (first administration) wins. Such cases are returned in
+    `conflicts` so they are printed and can be checked by hand.
+    """
+    loaded = [(p, load_quest_items(p)) for p in paths]
+    parts, n_items, sources, conflicts = [], {}, {}, []
+    scales = sorted(set().union(*[set(d.attrs["n_items_scale"])
+                                  for _, d in loaded]))
+    for sc in scales:
+        cands = [(p, d) for p, d in loaded if sc in d.attrs["n_items_scale"]]
+        # most answered items first; stable sort keeps the earlier file
+        # first on a tie
+        cands.sort(key=lambda pd_: -(pd_[1]["Scale"] == sc).sum())
+        best_p, best_d = cands[0]
+        answered = [(p.name, int((d["Scale"] == sc).sum())) for p, d in cands]
+        if sum(1 for _, n in answered if n > 0) > 1:
+            conflicts.append((sc, answered, best_p.name))
+        parts.append(best_d[best_d["Scale"] == sc])
+        n_items[sc] = best_d.attrs["n_items_scale"][sc]
+        sources[sc] = best_p.name
+    items = pd.concat(parts, ignore_index=True)
+    items.attrs["n_items_scale"] = n_items
+    items.attrs["source_file"] = sources
+    items.attrs["participant_field"] = next(
+        (d.attrs["participant_field"] for _, d in loaded
+         if d.attrs["participant_field"] is not None), None)
+    return items, conflicts
 
 
 def load_quest_items(csv_path):
@@ -546,8 +592,8 @@ def report_scale_coverage(per_subject_items):
         if s in cov.columns:
             missing = cov.loc[~cov[s], "subject"].tolist()
             if missing:
-                print(f"  {s}: absent for {len(missing)} subject(s) "
-                      f"(added to the battery later) -> {missing}")
+                print(f"  {s}: absent from ALL quest files of {len(missing)} "
+                      f"subject(s) (added to the battery later) -> {missing}")
     return cov
 
 
@@ -717,10 +763,14 @@ def main():
 
     per_subject_items = {}
     for sid, paths in sorted(subs.items()):
-        if not paths.get("quest"):
+        if not paths.get("quests"):
             print(f"  P{sid}: no Pysch_quest file, skipping scale scoring.")
             continue
-        per_subject_items[sid] = load_quest_items(paths["quest"])
+        items, conflicts = merge_quest_files(paths["quests"])
+        for sc, answered, used in conflicts:
+            print(f"  *** P{sid}: {sc} answered in more than one file "
+                  f"{answered} -> using {used}. Check this is right. ***")
+        per_subject_items[sid] = items
 
     if not per_subject_items:
         raise RuntimeError("No Pysch_quest files could be loaded.")
@@ -775,6 +825,10 @@ def main():
     fig_dir.mkdir(exist_ok=True)
     audit.to_csv(OUT_DIR / "subject_id_audit.csv", index=False)
     cov.to_csv(OUT_DIR / "scale_coverage_per_subject.csv", index=False)
+    pd.DataFrame([dict(subject=sid, scale=sc, source_file=f)
+                  for sid, it in sorted(per_subject_items.items())
+                  for sc, f in sorted(it.attrs["source_file"].items())]
+                 ).to_csv(OUT_DIR / "quest_file_per_scale.csv", index=False)
     for sc in sorted(ITEM_LEVEL_SCALES):
         write_item_legend(per_subject_items, OUT_DIR, sc)
     plot_quest_violins(scores, fig_dir)
