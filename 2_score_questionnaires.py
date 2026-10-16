@@ -95,6 +95,10 @@ warnings.filterwarnings("ignore")
 QUEST_DIR = Path("/home/ZhangJianfeng_04/emo_study/Behav/quest/quest")
 OUT_DIR = Path("/home/ZhangJianfeng_04/emo_study/Behav/quest/analysis")
 
+# Only subjects with an ID BELOW this number are scored (e.g. 199 keeps
+# 000-198); files of higher IDs are skipped. None = keep everyone.
+SUBJECT_ID_BELOW = 199
+
 # Set to a (min, max) tuple to override auto-detection.
 SLIDER_BOUNDS_OVERRIDE = None
 
@@ -282,6 +286,12 @@ def find_subject_files(quest_dir):
               f"The later filename is used - confirm that is right: ***")
         for sid, a, b in bdi_dups:
             print(f"      subject {sid}: {a}  vs  {b}   -> using {b}")
+    if SUBJECT_ID_BELOW is not None:
+        dropped = sorted(sid for sid in subs if sid >= SUBJECT_ID_BELOW)
+        if dropped:
+            print(f"  Subject filter: keeping IDs < {SUBJECT_ID_BELOW}; "
+                  f"skipped {len(dropped)} subject(s) -> {dropped}")
+        subs = {sid: v for sid, v in subs.items() if sid < SUBJECT_ID_BELOW}
     return subs
 
 
