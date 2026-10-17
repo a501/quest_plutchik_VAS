@@ -20,7 +20,7 @@ Input:  /home/ZhangJianfeng_04/emo_study/MEG/2_cut/{subject}_emo_rest_tsss_mc_{1
 Output: /home/ZhangJianfeng_04/emo_study/MEG/3_preproc/
 
 Usage:
-    python3 Preproc_MEG_dyn_cut.py
+    python3 Preproc_MEG_dyn_cut_python.py
 
 Processes every .fif in 2_cut/ in one run (no SLURM needed), N_WORKERS
 subjects at the same time (default 4). A file is SKIPPED if its three
