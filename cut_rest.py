@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-cut_rest_python.py
-==================
+cut_rest.py
+===========
 Cut each subject's resting-state MEG recording into ONE continuous segment:
 
     {stem}_cut.fif
@@ -29,11 +29,11 @@ Input  : /home/ZhangJianfeng_04/emo_study/MEG/1_raw/{subject}/**/*rest*tsss*.fif
 Output : /home/ZhangJianfeng_04/emo_study/Rest_task/2_cut/{subject}_..._cut.fif
          (always starts with the subject ID, even if the raw name does not)
 
-Plain Python, no SLURM. Usage:
-    python3 cut_rest_python.py              # all subjects
-    python3 cut_rest_python.py 031          # subject 031 only
-    python3 cut_rest_python.py --dry-run    # report only, write nothing
-    python3 cut_rest_python.py 031 --dry-run
+Usage:
+    python3 cut_rest.py              # all subjects
+    python3 cut_rest.py 031          # subject 031 only
+    python3 cut_rest.py --dry-run    # report only, write nothing
+    python3 cut_rest.py 031 --dry-run
 """
 
 import os
