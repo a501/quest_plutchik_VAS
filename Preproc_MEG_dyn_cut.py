@@ -22,23 +22,44 @@ Output: /home/ZhangJianfeng_04/emo_study/MEG/3_preproc/
 Usage:
     python3 Preproc_MEG_dyn_cut.py
 
-Processes every .fif in 2_cut/ in one run (no SLURM needed). A file is
-SKIPPED if its three outputs (_preproc.fif, _preproc_ecg.fif, _ica.fif)
-already exist in 3_preproc/. Set FORCE = True below to redo everything.
+Processes every .fif in 2_cut/ in one run (no SLURM needed), N_WORKERS
+subjects at the same time (default 4). A file is SKIPPED if its three
+outputs (_preproc.fif, _preproc_ecg.fif, _ica.fif) already exist in
+3_preproc/. Set FORCE = True below to redo everything. Each file's full
+output goes to 3_preproc/<file>_preproc_log.txt.
 """
+
+import os
+
+# ── PARALLEL RUN ───────────────────────────────────────────────
+# Number of SUBJECTS preprocessed at the same time (each subject's files
+# run one after another inside its worker). Every worker holds a full
+# recording in memory several times over (raw, ICA copy, two cleaned
+# copies), so check free RAM before raising this.
+N_WORKERS = 4
+
+# Split the CPU cores between the workers, so 4 workers do not each try
+# to use every core (which makes everything slower). Must be set BEFORE
+# numpy / mne are imported.
+_threads = str(max(1, (os.cpu_count() or N_WORKERS) // N_WORKERS))
+for _v in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+           'NUMEXPR_NUM_THREADS'):
+    os.environ.setdefault(_v, _threads)
 
 from mne.preprocessing import ICA
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')           # non-interactive backend — required on Linux servers
 import matplotlib.pyplot as plt
-import os
 import sys
 import mne
 import pandas as pd
 import glob
 import re
 import traceback
+import multiprocessing as mp
+from collections import defaultdict
+from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
 
 import warnings
@@ -99,16 +120,17 @@ for fif_path in fif_paths:
     })
 
 # ============================================================
-# SUMMARY LOG
-# ============================================================
-
-summary_rows = []
-
-# ============================================================
 # MAIN LOOP
 # ============================================================
 
-for entry in MEG:
+def is_done(entry):
+    stem = os.path.splitext(entry['filename'])[0]
+    return all(os.path.isfile(os.path.join(output_dir, f'{stem}{suf}'))
+               for suf in ('_preproc.fif', '_preproc_ecg.fif', '_ica.fif'))
+
+
+def preprocess_file(entry):
+    """Preprocess ONE file; returns its summary row."""
 
     subject  = entry['subject']
     block    = entry['block']
@@ -125,7 +147,7 @@ for entry in MEG:
     done = all(os.path.isfile(f) for f in (out_eog, out_ecg, out_ica))
     if done and not FORCE:
         print(f"SKIP (already preprocessed): {filename}")
-        continue
+        return None
 
     log = {
         'Subject'        : subject,
@@ -493,36 +515,92 @@ for entry in MEG:
         traceback.print_exc()
 
     finally:
-        summary_rows.append(log)
         plt.close('all')
 
+    return log
+
+
+def preprocess_subject(entries):
+    """Run one subject's files one after another, inside one worker.
+    Each file's full console output goes to its own log file in
+    output_dir ({stem}_preproc_log.txt) instead of the screen, so the
+    4 workers' messages do not get mixed together."""
+    logs = []
+    for entry in entries:
+        stem = os.path.splitext(entry['filename'])[0]
+        log_path = os.path.join(output_dir, f'{stem}_preproc_log.txt')
+        with open(log_path, 'w') as fh, redirect_stdout(fh), redirect_stderr(fh):
+            try:
+                row = preprocess_file(entry)
+            except Exception as e:          # never let one file kill the worker
+                traceback.print_exc()
+                row = {'Subject': entry['subject'], 'Block': entry['block'],
+                       'File': entry['filename'],
+                       'Status': f'Error: {str(e)[:150]}'}
+        if row is not None:
+            row['Log'] = os.path.basename(log_path)
+            logs.append(row)
+    return entries[0]['subject'], logs
+
 # ============================================================
-# SAVE SUMMARY
+# RUN
 # ============================================================
 
-# Merge this run's rows into the existing summary, so files skipped in
-# this run keep the row from the run that processed them.
-summary_file = os.path.join(output_dir, 'preprocessing_summary.csv')
-new_rows = pd.DataFrame(summary_rows)
-if os.path.isfile(summary_file):
-    old_rows = pd.read_csv(summary_file)
+def main():
+    todo = [e for e in MEG if FORCE or not is_done(e)]
+    for e in MEG:
+        if e not in todo:
+            print(f"SKIP (already preprocessed): {e['filename']}")
+
+    by_subject = defaultdict(list)
+    for e in todo:
+        by_subject[e['subject']].append(e)
+
+    summary_rows = []
+    if by_subject:
+        n_workers = min(N_WORKERS, len(by_subject))
+        print(f"\nPreprocessing {len(todo)} file(s) from {len(by_subject)} "
+              f"subject(s), {n_workers} subject(s) at a time "
+              f"({_threads} CPU thread(s) each).")
+        print(f"Per-file details: {output_dir}/<file>_preproc_log.txt\n")
+        ctx = mp.get_context('fork')        # Linux; workers inherit the setup
+        with ctx.Pool(n_workers, maxtasksperchild=1) as pool:
+            for subj, logs in pool.imap_unordered(
+                    preprocess_subject, list(by_subject.values())):
+                for row in logs:
+                    mark = '✓' if row['Status'] == 'Success' else '✗'
+                    print(f"  {mark} [{datetime.now().strftime('%H:%M:%S')}] "
+                          f"{row['File']}: {row['Status']}")
+                summary_rows.extend(logs)
+
+    # ---- SAVE SUMMARY ----
+    # Merge this run's rows into the existing summary, so files skipped in
+    # this run keep the row from the run that processed them.
+    summary_file = os.path.join(output_dir, 'preprocessing_summary.csv')
+    new_rows = pd.DataFrame(summary_rows)
+    if os.path.isfile(summary_file):
+        old_rows = pd.read_csv(summary_file)
+        if len(new_rows):
+            old_rows = old_rows[~old_rows['File'].isin(new_rows['File'])]
+        new_rows = pd.concat([old_rows, new_rows], ignore_index=True)
     if len(new_rows):
-        old_rows = old_rows[~old_rows['File'].isin(new_rows['File'])]
-    new_rows = pd.concat([old_rows, new_rows], ignore_index=True)
-if len(new_rows):
-    new_rows.sort_values('File').to_csv(summary_file, index=False)
+        new_rows.sort_values('File').to_csv(summary_file, index=False)
 
-print(f"\n{'='*60}")
-print(f"Processing complete — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-n_skip = len(MEG) - len(summary_rows)
-if summary_rows:
-    summary_df = pd.DataFrame(summary_rows)
-    n_ok  = (summary_df['Status'] == 'Success').sum()
-    n_err = len(summary_df) - n_ok
-    print(f"This run — processed: {len(summary_df)}  |  Success: {n_ok}  |  "
-          f"Failed: {n_err}  |  Skipped (already done): {n_skip}")
-    print(summary_df[['Subject', 'Block', 'File', 'Status']].to_string(index=False))
-else:
-    print(f"Nothing to do — all {n_skip} file(s) already processed.")
-print(f"Summary (all runs): {summary_file}")
-print(f"{'='*60}")
+    print(f"\n{'='*60}")
+    print(f"Processing complete — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    n_skip = len(MEG) - len(todo)
+    if summary_rows:
+        summary_df = pd.DataFrame(summary_rows)
+        n_ok  = (summary_df['Status'] == 'Success').sum()
+        n_err = len(summary_df) - n_ok
+        print(f"This run — processed: {len(summary_df)}  |  Success: {n_ok}  |  "
+              f"Failed: {n_err}  |  Skipped (already done): {n_skip}")
+        print(summary_df[['Subject', 'Block', 'File', 'Status']].to_string(index=False))
+    else:
+        print(f"Nothing to do — all {n_skip} file(s) already processed.")
+    print(f"Summary (all runs): {summary_file}")
+    print(f"{'='*60}")
+
+
+if __name__ == '__main__':
+    main()
