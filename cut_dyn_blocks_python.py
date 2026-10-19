@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-cut_dyn_blocks.py
-=================
+cut_dyn_blocks_python.py
+========================
 Cut each subject's MEG rest-task recording(s) into 3 block segments:
   {subj}_*_1b_base.fif   — baseline rest block
   {subj}_*_2b_sad.fif    — sad video + rest  (or fear)
@@ -30,8 +30,8 @@ Output : /home/ZhangJianfeng_04/emo_study/MEG/2_cut/{subject}_..._{1b_base,2b_*,
          file name does not.
 
 Plain Python, no SLURM. Usage:
-    python3 cut_dyn_blocks.py            # process ALL subjects found
-    python3 cut_dyn_blocks.py 001        # process subject 001 only
+    python3 cut_dyn_blocks_python.py            # process ALL subjects found
+    python3 cut_dyn_blocks_python.py 001        # process subject 001 only
 """
 
 import os
