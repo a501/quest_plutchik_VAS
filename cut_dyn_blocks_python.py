@@ -12,6 +12,20 @@ Resume logic (per subject, not per file):
   2. If all 3 exist → skip subject entirely (no file is opened).
   3. If any missing → open the raw file(s) and cut what's missing.
 
+Block numbering is per SUBJECT, not per raw file: when a session was split
+over several raw files (e.g. 036_emo_rest1 + 036_emo_rest_2_3), the files are
+processed in recording order (raw.info['meas_date'] = the date/time the
+recording was started, stored in the FIF header) and the numbering continues
+from one file to the next (1b, 2b, 3b).
+
+Repeated video triggers: if a video trigger is followed by another video
+trigger before its rest_onset (video started, stopped, restarted), only the
+LAST trigger before that rest is used — the one followed by the full rest
+block with no other video trigger in between.
+
+Log file: everything printed is also written to
+  {OUTPUT_DIR}/logs/cut_dyn_blocks_YYYYmmdd_HHMMSS.log
+
 Block detection is trigger-based only — filename content is never assumed:
   Base blocks  : rest_offset count − video_onset count
   Video blocks : video_onset count (code 7=sad, 8=fear)
@@ -41,6 +55,7 @@ import glob
 import mne
 import numpy as np
 import warnings
+from datetime import datetime
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 INPUT_ROOT  = '/home/ZhangJianfeng_04/emo_study/MEG/1_raw'
@@ -66,6 +81,30 @@ PAD_AFTER_S         = 2.0   # seconds after rest_offset, all blocks
 subject_filter = sys.argv[1] if len(sys.argv) > 1 else None
 
 split_re = re.compile(r'-\d+\.fif$')
+
+
+class Tee:
+    """Write everything printed to the terminal AND to a log file."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for st in self.streams:
+            st.write(text)
+            st.flush()
+
+    def flush(self):
+        for st in self.streams:
+            st.flush()
+
+
+LOG_DIR = os.path.join(OUTPUT_DIR, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_PATH = os.path.join(
+    LOG_DIR, f"cut_dyn_blocks_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+_log_file = open(LOG_PATH, 'w', encoding='utf-8')
+sys.stdout = Tee(sys.__stdout__, _log_file)
+sys.stderr = Tee(sys.__stderr__, _log_file)
 
 
 def find_tsss_files(subj_id):
@@ -96,9 +135,14 @@ def subject_outputs_complete(subj_id):
       {subj_id}_*_1b_base*.fif
       {subj_id}_*_2b_*.fif      (sad or fear)
       {subj_id}_*_3b_*.fif      (sad or fear)
+    Also warns (does not fix) when the outputs look wrong: a block number
+    other than 1b-3b (e.g. 4b), a block present more than once, or the two
+    video blocks not being one sad + one fear. Such outputs come from the
+    old per-file numbering - fix them with fix_cut_names.py.
     Returns (complete: bool, missing: list of block labels)
     """
     missing = []
+    conditions = []
     for pattern, label in [
         (f"{subj_id}_*_1b_base*.fif", "1b_base"),
         (f"{subj_id}_*_2b_*.fif",     "2b"),
@@ -108,6 +152,19 @@ def subject_outputs_complete(subj_id):
                    if not split_re.search(f)]
         if not matches:
             missing.append(label)
+        elif len(matches) > 1:
+            print(f"  ! WARNING: {label} exists {len(matches)}x: "
+                  f"{[os.path.basename(f) for f in matches]}")
+        if label != "1b_base":
+            conditions += [re.search(r'_\db_([a-z]+)\.fif$', f).group(1)
+                           for f in matches]
+    extra = [f for f in glob.glob(os.path.join(OUTPUT_DIR, f"{subj_id}_*_[4-9]b_*.fif"))
+             if not split_re.search(f)]
+    if extra:
+        print(f"  ! WARNING: unexpected block number(s): "
+              f"{[os.path.basename(f) for f in extra]}")
+    if not missing and sorted(conditions) != ['fear', 'sad']:
+        print(f"  ! WARNING: video blocks are {conditions}, expected one sad + one fear")
     return len(missing) == 0, missing
 
 
@@ -160,6 +217,16 @@ def find_key_events(raw):
             print(f"  ! video {label} t={t_vid:.1f}s → no rest_onset after → SKIP")
             continue
         ron = next_on[0]
+
+        # another video trigger before this rest_onset → this one was
+        # aborted/restarted; the later trigger owns the rest block
+        later_vids = video_all[(video_all[:, 0] > vid[0]) & (video_all[:, 0] < ron)]
+        if len(later_vids) > 0:
+            nxt = later_vids[0]
+            nxt_label = 'sad' if int(nxt[2]) == VIDEO_SAD_CODE else 'fear'
+            print(f"  ✗ video {label} t={t_vid:.1f}s → superseded by video {nxt_label} "
+                  f"t={to_s(nxt[0]):.1f}s before rest_onset → SKIP (repeated trigger)")
+            continue
 
         next_off = rest_off_all[rest_off_all > ron]
         if len(next_off) == 0:
@@ -248,7 +315,10 @@ def cut_and_save(raw, tmin_s, tmax_s, out_path):
     print(f"    Saved ({raw_cut.times[-1]/60:.2f} min)  ->  {out_path}")
 
 
-def process_file(fif_path, subj_id):
+def process_file(fif_path, subj_id, raw, base_count, video_count):
+    """Cut one raw file. base_count / video_count = number of base / video
+    blocks already found in this subject's EARLIER raw files, so numbering
+    continues across split recordings. Returns the updated counts."""
     fname = os.path.basename(fif_path)
     stem  = os.path.splitext(fname)[0]
     # outputs must start with the subject ID: 2_cut/ is flat, so a raw file
@@ -258,11 +328,8 @@ def process_file(fif_path, subj_id):
     if not stem.startswith(f"{subj_id}_"):
         stem = f"{subj_id}_{stem}"
     print(f"\n  File : {stem}")
+    print(f"  meas_date={raw.info['meas_date']}")
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings('ignore', message='.*naming conventions.*',
-                                category=RuntimeWarning)
-        raw = mne.io.read_raw_fif(fif_path, preload=False, verbose=False)
     sfreq     = raw.info['sfreq']
     total_dur = raw.times[-1]
     print(f"  sfreq={sfreq} Hz | duration={total_dur/60:.2f} min")
@@ -271,12 +338,9 @@ def process_file(fif_path, subj_id):
         blocks = find_key_events(raw)
     except Exception as e:
         print(f"  X Could not find events: {e}")
-        return []
+        return base_count, video_count
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    cuts_made   = []
-    base_count  = 0
-    video_count = 0
 
     for block in blocks:
         condition = block['condition']
@@ -294,15 +358,20 @@ def process_file(fif_path, subj_id):
 
         if os.path.isfile(out_path):
             print(f"  {os.path.basename(out_path)} already exists — skipping.")
-            cuts_made.append(out_path)
             continue
 
         print(f"  Cutting {os.path.basename(out_path)}: "
               f"{tmin_s:.1f}s → {tmax_s:.1f}s ({(tmax_s-tmin_s)/60:.1f} min)")
         cut_and_save(raw, tmin_s, tmax_s, out_path)
-        cuts_made.append(out_path)
 
-    return cuts_made
+    return base_count, video_count
+
+
+def read_raw(fif_path):
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='.*naming conventions.*',
+                                category=RuntimeWarning)
+        return mne.io.read_raw_fif(fif_path, preload=False, verbose=False)
 
 
 # ── Collect subjects ───────────────────────────────────────────────────────────
@@ -347,16 +416,32 @@ for subj_id in subj_ids:
     for f in raw_files:
         print(f"    {os.path.relpath(f, INPUT_ROOT)}")
 
-    # Step 3: process each raw file
-    for fif_path in raw_files:
+    # Step 3: open all raw files and put them in recording order
+    # (meas_date = recording start time; file name order as fallback)
+    opened = []
+    for i, fif_path in enumerate(raw_files):
         try:
-            process_file(fif_path, subj_id)
+            opened.append((fif_path, read_raw(fif_path), i))
+        except Exception as e:
+            print(f"  X Error opening {os.path.basename(fif_path)}: {e}")
+            n_err += 1
+    if all(r.info['meas_date'] is not None for _, r, _ in opened):
+        opened.sort(key=lambda x: x[1].info['meas_date'])
+    else:
+        print("  ! meas_date missing - using file name order")
+
+    # Step 4: process each raw file; block numbering continues across files
+    base_count, video_count = 0, 0
+    for fif_path, raw, _ in opened:
+        try:
+            base_count, video_count = process_file(
+                fif_path, subj_id, raw, base_count, video_count)
             n_ok += 1
         except Exception as e:
             print(f"  X Error on {os.path.basename(fif_path)}: {e}")
             n_err += 1
 
-    # Step 4: report final status for this subject
+    # Step 5: report final status for this subject
     complete_after, missing_after = subject_outputs_complete(subj_id)
     if complete_after:
         print(f"  ✓ Subject {subj_id} complete.")
@@ -366,3 +451,4 @@ for subj_id in subj_ids:
 print(f"\n{'='*60}")
 print(f"Done — {n_ok} file(s) processed | {n_skip} subject(s) skipped | {n_err} error(s)")
 print(f"Output dir: {OUTPUT_DIR}")
+print(f"Log file  : {LOG_PATH}")
