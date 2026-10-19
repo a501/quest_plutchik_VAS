@@ -3,17 +3,48 @@
 Behavioural VAS rest-period timeseries analysis (emo_study).
 
 For each subject file (dynNNN_results.csv) this script:
-  * keeps ONLY within_rest rows (drops post_video),
-  * splits the file into its 3 blocks (base, then two emotion blocks),
-  * resolves which emotion block is 'sad' vs 'fear' via odd/even
-    counterbalancing of the subject number,
+  * splits the file into its rest blocks (base, then two emotion blocks),
+    using the block definition below,
+  * keeps ONLY within_rest rows (drops post_video) and only CONFIRMED
+    ratings (a timeout leaves the cursor wherever it was, so its value is
+    not a rating),
+  * labels the two emotion blocks 'sad' / 'fear' from the video triggers
+    of the MEG trigger file (7 = sad, 8 = fear); odd/even subject number
+    is only the fallback,
   * analyses the Sadness series and the Fear series SEPARATELY within
     every block (base + sad + fear) -> 6 series per subject,
   * runs a battery of complexity / frequency measures suited to short,
     irregularly-sampled series (N ~ 24),
-  * writes one long-format CSV per subject.
+  * writes one long-format CSV per subject, the per-block audit CSVs and
+    one QC table for all subjects.
 
-Design decisions (see accompanying discussion):
+Plain Python, no SLURM. N_WORKERS subjects run at the same time (default 4).
+
+Block definition (same rules as cut_dyn_blocks_python.py on the MEG side):
+  1. A new rest run starts after every run of post_video rows, and also
+     where elapsed_s jumps BACK within within_rest rows (elapsed_s is
+     block-relative, so a jump back means the rest task was restarted
+     without a video in between, e.g. a false start).
+  2. A run is a complete block only if its last probe is at or after
+     MIN_LAST_PROBE_S (a 20-min rest block has its last probe at ~19 min).
+     Shorter runs are aborted / false-start runs and are dropped. This is
+     the behavioural counterpart of the 18-22 min rest-window check on the
+     triggers.
+  3. Position = number of post_video runs before the run:
+        0 -> block 1 = base, 1 -> block 2 = first video, 2 -> block 3 =
+        second video. If two complete runs share a position, the one with
+        more confirmed ratings is kept (later one on a tie) and this is
+        flagged.
+  4. Which video came first is read from the trigger file
+     Behav/MEG_trigger_files/{NNN}_emo_rest_all_triggers.csv. A video
+     trigger (7 = sad, 8 = fear) counts only if the next rest_onset (1) ->
+     rest_offset (2) window after it lasts 18-22 min, so videos of aborted
+     runs are ignored. Fallback when there is no usable trigger file:
+     subject parity (odd -> block 2 = sad; root subject 000 and its repeat
+     visits 200/300 count as sad-first, like 001). Both orders are stored
+     in the QC table and a disagreement is flagged.
+
+Design decisions for the measures (unchanged):
   - The VAS rest series are SHORT (~24 pts) and IRREGULARLY sampled in
     time (elapsed_s). Frequency analysis therefore uses Lomb-Scargle on
     the real timestamps, computed ONCE per series; peak/median freq and
@@ -29,19 +60,43 @@ Design decisions (see accompanying discussion):
   - Timeseries-valued outputs (periodogram, ACF) are JSON-serialised
     into a single cell.
 
-Counterbalancing (video order):
-    Odd  subjects -> Block 2 = sad,  Block 3 = fear
-    Even subjects -> Block 2 = fear, Block 3 = sad
-(Block 1 = base, always first, no counterbalancing.)
+Outputs (OUT_DIR = Behav/analysis):
+  dyn{NNN}_vas_analysis.csv                    measures, long format
+  behav_per_block/dyn{NNN}_block{k}_{role}_behav.csv
+        all within_rest rows of the kept block; 'rating' = confirmed
+        rating (empty for timeouts), 'rating_raw' = value as logged
+  behav_vas_qc.csv                             one row per subject
+
+A subject is SKIPPED if its dyn{NNN}_vas_analysis.csv is newer than its
+results file and trigger file. Use --force to redo (needed once after
+this block-definition change).
 
 Usage:
-    python3 analyze_behav_vas.py <subject_id>
-    python3 analyze_behav_vas.py 019
+    python3 analyze_behav_vas.py                  # all subjects (ID < SUBJ_MAX)
+    python3 analyze_behav_vas.py 014 019          # these subjects only
+    python3 analyze_behav_vas.py --force          # redo everything
+    python3 analyze_behav_vas.py --workers 2      # 2 subjects at a time
 """
 
 import os
-import sys
+
+# ---- PARALLEL RUN ---------------------------------------------------
+# Number of SUBJECTS analysed at the same time.
+N_WORKERS = 4
+
+# Split the CPU cores between the workers. Must be set BEFORE numpy is
+# imported.
+_threads = str(max(1, (os.cpu_count() or N_WORKERS) // N_WORKERS))
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, _threads)
+
+import argparse
+import glob
 import json
+import multiprocessing as mp
+import re
+import traceback
 import warnings
 
 import numpy as np
@@ -56,9 +111,27 @@ warnings.filterwarnings("ignore")
 # ===================================================================
 
 BEHAV_DIR = "/home/ZhangJianfeng_04/emo_study/Behav/raw"
+TRIG_DIR = "/home/ZhangJianfeng_04/emo_study/Behav/MEG_trigger_files"
 OUT_DIR = "/home/ZhangJianfeng_04/emo_study/Behav/analysis"
+PERBLOCK_DIR = os.path.join(OUT_DIR, "behav_per_block")
+QC_FILE = os.path.join(OUT_DIR, "behav_vas_qc.csv")
+
+SUBJ_MAX = 200         # analyse subjects with ID < SUBJ_MAX (repeat visits 2xx/3xx excluded)
 
 EMOTIONS = ["Sadness", "Fear"]
+
+# ---- block definition ---------------------------------------------
+MIN_LAST_PROBE_S = 15 * 60   # a complete 20-min rest run has its last
+                             # probe at ~19 min; runs ending earlier are
+                             # aborted / false starts
+REST_DUR_MIN_S = 18 * 60     # trigger rest window (rest_onset -> offset)
+REST_DUR_MAX_S = 22 * 60     # valid range, as in cut_dyn_blocks_python.py
+
+# ---- trigger codes --------------------------------------------------
+REST_ONSET_CODE = 1
+REST_OFFSET_CODE = 2
+VIDEO_SAD_CODE = 7
+VIDEO_FEAR_CODE = 8
 
 # ---- minimum-N floors (scientific) --------------------------------
 # Below these, the measure is NOT computed (NaN + flag).
@@ -371,147 +444,304 @@ def analyze_series(t, vals, meta):
     return rows
 
 
+
 # ===================================================================
-# BLOCK SPLITTING + COUNTERBALANCING
+# BLOCK DEFINITION + CONDITION LABELS
 # ===================================================================
 
-def label_and_split_blocks(df, subject_num):
-    """
-    Assign a block index + role label to EVERY raw row (including post_video)
-    BEFORE any rows are dropped, then return:
-      - labelled_full : the full raw df with 'block_num' and 'block_role'
-                        columns added (post_video rows still present),
-      - rest_blocks   : list of per-block DataFrames containing only the
-                        within_rest rows, in file order.
+def parity_order(subject_id):
+    """Fallback video order from the subject number. Root subject 000 (and
+    its repeat visits 200/300) counts as sad-first, like 001."""
+    root = int(subject_id) % 100
+    sad_first = (root % 2 == 1) or root == 0
+    return ["sad", "fear"] if sad_first else ["fear", "sad"]
 
-    Block boundaries are the post_video markers: each post_video row (or run
-    of them) closes the current block; the next within_rest run is a new
-    block. Block 0 = base (always first, no video). Blocks 1,2 = the two
-    emotion videos, resolved by odd/even counterbalancing.
-    """
-    d = df.reset_index(drop=True).copy()
-    ctx = d["context"].astype(str).values
 
-    # Walk rows; a block starts at the first within_rest after a post_video
-    # (or at the very start). post_video rows belong to the block they close.
-    block_idx = np.full(len(d), -1, dtype=int)
-    cur = 0
-    prev_was_post = False
-    seen_rest_in_block = False
-    for i in range(len(d)):
-        is_rest = ctx[i] == "within_rest"
+def trigger_video_order(subject_id):
+    """Video order from the MEG trigger file. A video trigger counts only
+    if the next rest_onset -> rest_offset window after it lasts
+    REST_DUR_MIN_S..REST_DUR_MAX_S (videos of aborted runs are ignored).
+    Returns (order or None, note)."""
+    path = os.path.join(TRIG_DIR, f"{subject_id}_emo_rest_all_triggers.csv")
+    if not os.path.exists(path):
+        return None, "no trigger file"
+    t = pd.read_csv(path)
+    if "trigger_code" not in t.columns or "timestamp_s" not in t.columns:
+        return None, f"trigger columns missing ({list(t.columns)})"
+    codes = t["trigger_code"].to_numpy(dtype=int)
+    times = t["timestamp_s"].to_numpy(dtype=float)
+    idx = np.arange(len(codes))
+
+    seq, dropped = [], []
+    for i in np.flatnonzero(np.isin(codes, [VIDEO_SAD_CODE, VIDEO_FEAR_CODE])):
+        label = "sad" if codes[i] == VIDEO_SAD_CODE else "fear"
+        on = np.flatnonzero((codes == REST_ONSET_CODE) & (idx > i))
+        off = (np.flatnonzero((codes == REST_OFFSET_CODE) & (idx > on[0]))
+               if len(on) else [])
+        if len(on) == 0 or len(off) == 0:
+            dropped.append(f"{label}@{times[i]:.0f}s: no rest window after")
+            continue
+        dur = times[off[0]] - times[on[0]]
+        if not (REST_DUR_MIN_S <= dur <= REST_DUR_MAX_S):
+            dropped.append(f"{label}@{times[i]:.0f}s: rest {dur / 60:.1f} min")
+            continue
+        if not seq or seq[-1] != label:
+            seq.append(label)
+
+    note = "; ".join(f"video ignored ({d})" for d in dropped)
+    if len(seq) == 2 and set(seq) == {"sad", "fear"}:
+        return seq, note
+    return None, "; ".join(x for x in (note, f"video sequence {seq} not usable") if x)
+
+
+def split_rest_runs(df):
+    """Assign every within_rest row to a rest run. A new run starts after a
+    run of post_video rows, or where elapsed_s jumps back (task restarted
+    without a video). Returns a per-row run id (-1 for non-rest rows) and
+    the number of post_video runs before each row."""
+    ctx = df["context"].astype(str).str.strip().str.lower().to_numpy()
+    el = pd.to_numeric(df["elapsed_s"], errors="coerce").to_numpy(dtype=float)
+    run_id = np.full(len(df), -1, dtype=int)
+    n_video = np.zeros(len(df), dtype=int)
+    cur, videos, prev_post, last_t = -1, 0, False, np.nan
+    for i in range(len(df)):
         is_post = ctx[i] == "post_video"
-        if is_rest and prev_was_post:
-            # transition from a post_video run into new rest -> new block
-            cur += 1
-            seen_rest_in_block = True
-        elif is_rest:
-            seen_rest_in_block = True
-        block_idx[i] = cur
-        prev_was_post = is_post
-
-    d["block_num"] = block_idx + 1  # 1-based
-
-    n_blocks = int(block_idx.max()) + 1 if len(d) else 0
-    roles = block_role_map(subject_num, n_blocks)
-    d["block_role"] = [roles.get(b, f"block{b+1}") for b in block_idx]
-
-    rest_blocks = []
-    for b in range(n_blocks):
-        rb = d[(d["block_num"] == b + 1) & (d["context"] == "within_rest")]
-        rest_blocks.append(rb.reset_index(drop=True))
-    return d, rest_blocks
+        if is_post and not prev_post:
+            videos += 1
+        n_video[i] = videos
+        if ctx[i] == "within_rest":
+            if cur < 0 or prev_post or (np.isfinite(el[i]) and np.isfinite(last_t)
+                                        and el[i] < last_t):
+                cur += 1
+                last_t = np.nan
+            run_id[i] = cur
+            if np.isfinite(el[i]):
+                last_t = el[i]
+        prev_post = is_post
+    return run_id, n_video
 
 
-def block_role_map(subject_num, n_blocks):
-    """
-    Map block index -> role label.
-    Block 0 = base always. Blocks 1,2 depend on odd/even counterbalancing.
-        Odd  -> block index1 = sad, index2 = fear
-        Even -> block index1 = fear, index2 = sad
-    """
-    roles = {}
-    if n_blocks >= 1:
-        roles[0] = "base"
-    odd = (subject_num % 2) == 1
-    if n_blocks >= 2:
-        roles[1] = "sad" if odd else "fear"
-    if n_blocks >= 3:
-        roles[2] = "fear" if odd else "sad"
-    return roles
+def define_blocks(df, subject_id, qc, log):
+    """Return {block_num: DataFrame of that block's within_rest rows} with
+    block_role filled in, following the block definition in the header."""
+    run_id, n_video = split_rest_runs(df)
+    df = df.assign(_run=run_id, _pos=n_video)
+    rest = df[df["_run"] >= 0]
+
+    runs = []
+    for r, g in rest.groupby("_run"):
+        last = pd.to_numeric(g["elapsed_s"], errors="coerce").max()
+        runs.append(dict(run=r, pos=int(g["_pos"].iloc[0]), n_rows=len(g),
+                         n_valid=int(g["valid"].sum()), last_s=last,
+                         complete=bool(np.isfinite(last) and last >= MIN_LAST_PROBE_S)))
+    qc["n_rest_runs"] = len(runs)
+    flags = []
+    for r in runs:
+        if not r["complete"]:
+            flags.append(f"run{r['run'] + 1} dropped (last probe {r['last_s']:.0f}s, "
+                         f"{r['n_rows']} rows)")
+
+    # ---- video order: triggers first, parity as fallback ----
+    order_par = parity_order(subject_id)
+    order_trg, tnote = trigger_video_order(subject_id)
+    order = order_trg or order_par
+    qc.update(cond_source="triggers" if order_trg else "parity",
+              order_triggers="-".join(order_trg) if order_trg else "",
+              order_parity="-".join(order_par),
+              order_conflict=bool(order_trg and order_trg != order_par),
+              trigger_note=tnote)
+    if qc["order_conflict"]:
+        log.append(f"  !! video order: triggers {qc['order_triggers']} vs "
+                   f"parity {qc['order_parity']} -> using triggers")
+    elif not order_trg:
+        log.append(f"  ! video order from parity ({tnote})")
+    role_of = {0: "base", 1: order[0], 2: order[1]}
+
+    blocks = {}
+    for pos in sorted({r["pos"] for r in runs}):
+        cand = [r for r in runs if r["pos"] == pos and r["complete"]]
+        if not cand:
+            continue
+        if pos not in role_of:
+            flags.append(f"{len(cand)} complete run(s) after video {pos} dropped "
+                         f"(only 2 videos expected)")
+            continue
+        keep = max(cand, key=lambda r: (r["n_valid"], r["run"]))
+        if len(cand) > 1:
+            flags.append(f"{len(cand)} complete runs at block {pos + 1}, "
+                         f"kept run{keep['run'] + 1} ({keep['n_valid']} confirmed ratings)")
+        b = df[df["_run"] == keep["run"]].drop(columns=["_run", "_pos"]).copy()
+        b.insert(0, "block_num", pos + 1)
+        b.insert(1, "block_role", role_of[pos])
+        b.insert(2, "cond_source", qc["cond_source"] if pos else "")
+        blocks[pos + 1] = b.reset_index(drop=True)
+
+    if len(blocks) != 3:
+        flags.append(f"{len(blocks)} block(s) found (expected 3)")
+    qc["blocks_found"] = ",".join(f"{k}:{blocks[k]['block_role'].iloc[0]}"
+                                  for k in sorted(blocks))
+    qc["flags"] = "; ".join(flags)
+    for f in flags:
+        log.append(f"  ! {f}")
+    return blocks
+
+
+def load_results(subject_id):
+    fpath = os.path.join(BEHAV_DIR, f"dyn{subject_id}_results.csv")
+    df = pd.read_csv(fpath)
+    df.columns = df.columns.str.strip().str.lower()
+    for col in ("context", "elapsed_s", "emotion", "rating"):
+        if col not in df.columns:
+            raise KeyError(f"column '{col}' missing; has {list(df.columns)}")
+    df["emotion"] = df["emotion"].astype(str).str.strip().str.capitalize()
+    df["rating_raw"] = pd.to_numeric(df["rating"], errors="coerce")
+    if "status" in df.columns:
+        status = df["status"].astype(str).str.strip().str.lower()
+        df["valid"] = (status == "confirmed") & df["rating_raw"].notna()
+    else:
+        df["valid"] = df["rating_raw"].notna()
+    # 'rating' = the confirmed rating; a timeout keeps the cursor wherever
+    # it was, so its value is not a rating (kept in rating_raw)
+    df["rating"] = df["rating_raw"].where(df["valid"])
+    return df
 
 
 # ===================================================================
 # MAIN PER-SUBJECT DRIVER
 # ===================================================================
 
+def write_perblock(subject_id, blocks, log):
+    """Write the per-block audit CSVs. Old files of this script for this
+    subject are removed first, so a changed block label cannot leave a
+    stale file next to the new one. Other files of the subject are only
+    reported."""
+    os.makedirs(PERBLOCK_DIR, exist_ok=True)
+    own = re.compile(rf"^dyn{subject_id}_block\d+_[a-z]+_behav\.csv$")
+    for f in glob.glob(os.path.join(PERBLOCK_DIR, f"dyn{subject_id}_*.csv")):
+        name = os.path.basename(f)
+        if own.match(name):
+            os.remove(f)
+        else:
+            log.append(f"  ! behav_per_block/{name} was not written by this script "
+                       f"- remove it by hand, or 5_vas_fluctuation_proof.py "
+                       f"excludes that block as a duplicate")
+    for k, b in blocks.items():
+        b.to_csv(os.path.join(PERBLOCK_DIR,
+                              f"dyn{subject_id}_block{k}_{b['block_role'].iloc[0]}_behav.csv"),
+                 index=False)
+
+
 def process_subject(subject_id):
-    fname = f"dyn{subject_id}_results.csv"
-    fpath = os.path.join(BEHAV_DIR, fname)
-    if not os.path.exists(fpath):
-        raise FileNotFoundError(f"Behav file not found: {fpath}")
+    """One subject, inside one worker. Returns (subject_id, qc row, log lines);
+    never raises, so one bad file cannot stop the run."""
+    log = [f"[{subject_id}]"]
+    qc = dict(subject=subject_id, status="")
+    try:
+        df = load_results(subject_id)
+        if "subject_nr" in df.columns and int(df["subject_nr"].iloc[0]) != int(subject_id):
+            log.append(f"  ! subject_nr in file = {int(df['subject_nr'].iloc[0])} "
+                       f"(filename is used)")
+        blocks = define_blocks(df, subject_id, qc, log)
+        write_perblock(subject_id, blocks, log)
 
-    df = pd.read_csv(fpath)
-    subject_num = int(df["subject_nr"].iloc[0])
+        all_rows = []
+        for k, bdf in blocks.items():
+            role = bdf["block_role"].iloc[0]
+            for emo in EMOTIONS:
+                sub = bdf[(bdf["emotion"] == emo) & bdf["valid"]]
+                t = pd.to_numeric(sub["elapsed_s"], errors="coerce").to_numpy(dtype=float)
+                vals = sub["rating"].to_numpy(dtype=float)
+                good = ~np.isnan(t)
+                t, vals = t[good], vals[good]
+                n_all = int((bdf["emotion"] == emo).sum())
+                qc[f"n_{role}_{emo}"] = len(vals)
+                qc[f"n_timeout_{role}_{emo}"] = n_all - len(vals)
+                if len(vals) == 0:
+                    continue
+                meta = {"subject": subject_id,
+                        "subject_nr": int(subject_id),
+                        "block_role": role,
+                        "block_num": k,
+                        "emotion": emo}
+                all_rows.extend(analyze_series(t, vals, meta))
 
-    # Label EVERY row (incl post_video) with block_num + block_role BEFORE
-    # dropping anything, then get the within_rest-only per-block frames.
-    labelled_full, rest_blocks = label_and_split_blocks(df, subject_num)
-    if len(rest_blocks) < 3:
-        print(f"WARNING subject {subject_id}: found {len(rest_blocks)} blocks "
-              f"(expected 3). Proceeding with what is present.")
+        out = pd.DataFrame(all_rows)
+        out.to_csv(os.path.join(OUT_DIR, f"dyn{subject_id}_vas_analysis.csv"), index=False)
+        counts = "  ".join(f"{b['block_role'].iloc[0]} {int(b['valid'].sum())}/{len(b)}"
+                           for _, b in sorted(blocks.items()))
+        log.append(f"  blocks {qc['blocks_found'] or '-'}  (order: {qc['cond_source']})")
+        log.append(f"  confirmed/all ratings: {counts}")
+        qc["status"] = "ok"
+    except Exception as e:
+        log.append("  X FAILED: " + "".join(traceback.format_exception_only(type(e), e)).strip())
+        qc["status"] = f"error: {type(e).__name__}: {str(e)[:150]}"
+    return subject_id, qc, log
 
-    # ---- save the actual behavioural data used, one CSV per block ----
-    # This is the audit trail: exactly the within_rest ratings that feed
-    # each analysis, per block, with the emotion-block label attached.
-    behav_out_dir = os.path.join(OUT_DIR, "behav_per_block")
-    os.makedirs(behav_out_dir, exist_ok=True)
-    for bidx, rb in enumerate(rest_blocks):
-        if len(rb) == 0:
-            continue
-        role = rb["block_role"].iloc[0]
-        bpath = os.path.join(
-            behav_out_dir,
-            f"dyn{subject_id}_block{bidx+1}_{role}_behav.csv")
-        rb.to_csv(bpath, index=False)
 
-    all_rows = []
-    for bidx, bdf in enumerate(rest_blocks):
-        if len(bdf) == 0:
-            continue
-        role = bdf["block_role"].iloc[0]
-        for emo in EMOTIONS:
-            sub = bdf[bdf["emotion"] == emo]
-            if len(sub) == 0:
-                continue
-            t = sub["elapsed_s"].to_numpy(dtype=float)
-            vals = sub["rating"].to_numpy(dtype=float)
-            good = ~np.isnan(t)
-            t, vals = t[good], vals[good]
-            meta = {
-                "subject": subject_id,
-                "subject_nr": subject_num,
-                "block_role": role,
-                "block_num": bidx + 1,
-                "emotion": emo,
-            }
-            all_rows.extend(analyze_series(t, vals, meta))
-
-    out = pd.DataFrame(all_rows)
-    os.makedirs(OUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUT_DIR, f"dyn{subject_id}_vas_analysis.csv")
-    out.to_csv(out_path, index=False)
-    print(f"[OK] subject {subject_id}: {len(out)} rows -> {out_path}")
-    print(f"     per-block behav CSVs -> {behav_out_dir}")
-    return out_path
+def is_done(subject_id):
+    """Output exists and is newer than every input of this subject."""
+    out = os.path.join(OUT_DIR, f"dyn{subject_id}_vas_analysis.csv")
+    if not os.path.exists(out):
+        return False
+    inputs = [os.path.join(BEHAV_DIR, f"dyn{subject_id}_results.csv"),
+              os.path.join(TRIG_DIR, f"{subject_id}_emo_rest_all_triggers.csv")]
+    newest = max(os.path.getmtime(p) for p in inputs if os.path.exists(p))
+    return os.path.getmtime(out) >= newest
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 analyze_behav_vas.py <subject_id>  (e.g. 019)")
-        sys.exit(1)
-    subject_id = sys.argv[1].strip()
-    process_subject(subject_id)
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("subjects", nargs="*", help="subject IDs, e.g. 014 019 (default: all)")
+    ap.add_argument("--force", action="store_true", help="redo subjects already done")
+    ap.add_argument("--workers", type=int, default=N_WORKERS)
+    a = ap.parse_args()
+
+    found = sorted(m.group(1) for p in glob.glob(os.path.join(BEHAV_DIR, "dyn*_results.csv"))
+                   if (m := re.match(r"dyn(\d+)_results\.csv$", os.path.basename(p))))
+    if a.subjects:
+        want = {s.zfill(3) for s in a.subjects}
+        missing = sorted(want - set(found))
+        if missing:
+            print(f"No results file for: {', '.join(missing)}")
+        subs = [s for s in found if s in want]
+    else:
+        subs = [s for s in found if int(s) < SUBJ_MAX]
+
+    todo = [s for s in subs if a.force or not is_done(s)]
+    skipped = [s for s in subs if s not in todo]
+    if skipped:
+        print(f"SKIP (up to date, use --force to redo): {', '.join(skipped)}")
+    if not todo:
+        print("Nothing to do.")
+        return
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    n_workers = max(1, min(a.workers, len(todo)))
+    print(f"Analysing {len(todo)} subject(s), {n_workers} at a time.\n")
+    rows = []
+    ctx = mp.get_context("fork")
+    with ctx.Pool(n_workers) as pool:
+        for subject_id, qc, log in pool.imap_unordered(process_subject, todo):
+            print("\n".join(log), flush=True)
+            rows.append(qc)
+
+    # merge into the QC table, so subjects skipped in this run keep their row
+    new = pd.DataFrame(rows)
+    new["subject"] = new["subject"].astype(str)
+    if os.path.exists(QC_FILE):
+        old = pd.read_csv(QC_FILE, dtype={"subject": str})
+        new = pd.concat([old[~old["subject"].isin(new["subject"])], new], ignore_index=True)
+    new.sort_values("subject").to_csv(QC_FILE, index=False)
+
+    this = pd.DataFrame(rows)
+    n_ok = int((this["status"] == "ok").sum())
+    n_flag = int(this.get("flags", pd.Series(dtype=str)).fillna("").astype(bool).sum())
+    n_par = int((this.get("cond_source", pd.Series(dtype=str)) == "parity").sum())
+    print(f"\n{'=' * 60}")
+    print(f"Done - {n_ok} ok, {len(this) - n_ok} failed, {len(skipped)} skipped | "
+          f"{n_flag} with block flags, {n_par} with video order from parity")
+    print(f"QC table      : {QC_FILE}")
+    print(f"Per-block CSVs: {PERBLOCK_DIR}")
 
 
 if __name__ == "__main__":
