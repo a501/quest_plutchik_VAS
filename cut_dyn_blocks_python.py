@@ -23,6 +23,12 @@ trigger before its rest_onset (video started, stopped, restarted), only the
 LAST trigger before that rest is used — the one followed by the full rest
 block with no other video trigger in between.
 
+Recording stopped during a video (e.g. 042): if a raw file ends after a video
+trigger whose rest never started or never finished there, and the NEXT file
+starts with a rest that has no video trigger before it, that rest is the
+video's block (labelled with the video's condition, cut from rest_onset - 2 s;
+the video itself is not in that file). The log says so.
+
 Log file: everything printed is also written to
   {OUTPUT_DIR}/logs/cut_dyn_blocks_YYYYmmdd_HHMMSS.log
 
@@ -174,7 +180,7 @@ def subject_outputs_complete(subj_id):
     return len(missing) == 0, missing, wrong
 
 
-def find_key_events(raw):
+def find_key_events(raw, pending=None):
     """
     For each file, find valid blocks by:
 
@@ -187,13 +193,21 @@ def find_key_events(raw):
       Find rest_onset → rest_offset pairs with 19-22 min duration that have
       no video trigger between the preceding rest_offset and this rest_onset.
 
+    CONTINUED VIDEO BLOCK:
+      pending = condition of a video at the end of the PREVIOUS file whose
+      rest was not recorded there. The first rest of this file is that
+      video's block if no video trigger comes before it in this file.
+
     All times are relative to raw.first_samp (i.e. raw.times[0]=0 reference).
 
-    Returns: list of dicts with keys:
-      'type'      : 'base' or 'video'
-      'tmin_s'    : cut start time (seconds, relative to file start)
-      'tmax_s'    : cut end time
-      'condition' : 'base', 'sad', 'fear'
+    Returns (blocks, dangling):
+      blocks   : list of dicts with keys
+                   'type'      : 'base' or 'video'
+                   'tmin_s'    : cut start time (seconds, relative to file start)
+                   'tmax_s'    : cut end time
+                   'condition' : 'base', 'sad', 'fear'
+      dangling : condition of the LAST video trigger of this file if its rest
+                 did not start or did not end in this file, else None
     """
     events = mne.find_events(
         raw, stim_channel='STI101', min_duration=0.002, verbose=False
@@ -211,9 +225,11 @@ def find_key_events(raw):
     video_all    = events[np.isin(events[:, 2], [VIDEO_SAD_CODE, VIDEO_FEAR_CODE])]
 
     blocks = []
+    dangling = None
 
     # ── VIDEO BLOCKS ───────────────────────────────────────────────────────
-    for vid in video_all:
+    for i, vid in enumerate(video_all):
+        is_last = i == len(video_all) - 1
         t_vid  = to_s(vid[0])
         code   = int(vid[2])
         label  = 'sad' if code == VIDEO_SAD_CODE else 'fear'
@@ -221,6 +237,8 @@ def find_key_events(raw):
         next_on  = rest_on_all[rest_on_all > vid[0]]
         if len(next_on) == 0:
             print(f"  ! video {label} t={t_vid:.1f}s → no rest_onset after → SKIP")
+            if is_last:
+                dangling = label
             continue
         ron = next_on[0]
 
@@ -237,6 +255,8 @@ def find_key_events(raw):
         next_off = rest_off_all[rest_off_all > ron]
         if len(next_off) == 0:
             print(f"  ! video {label} t={t_vid:.1f}s → no rest_offset after rest_onset → SKIP")
+            if is_last:
+                dangling = label
             continue
         roff = next_off[0]
 
@@ -274,6 +294,22 @@ def find_key_events(raw):
                   f"({dur/60:.1f} min) → SKIP (wrong duration)")
             continue
 
+        if pending and not len(video_all[video_all[:, 0] < ron]):
+            # first rest of this file, no video before it, and the previous
+            # file stopped during a video -> it is that video's rest block
+            print(f"  ✓ rest {to_s(ron):.1f}–{to_s(roff):.1f}s ({dur/60:.1f} min) has no "
+                  f"video trigger before it, previous file ended during the {pending} "
+                  f"video → {pending.upper()} block (rest only, video not in this file)")
+            blocks.append({
+                'type'       : 'video',
+                'condition'  : pending,
+                'tmin_s'     : max(0.0, to_s(ron) - PAD_BEFORE_BLOCK1_S),
+                'tmax_s'     : min(to_s(roff) + PAD_AFTER_S, total_dur),
+                'roff_sample': roff,
+            })
+            pending = None
+            continue
+
         prev_roff = max([b['roff_sample'] for b in blocks] + [0])
         vids_in_window = video_all[
             (video_all[:, 0] > prev_roff) & (video_all[:, 0] < ron)
@@ -295,13 +331,20 @@ def find_key_events(raw):
 
     blocks.sort(key=lambda b: b['tmin_s'])
 
+    if pending:
+        print(f"  (previous file ended during the {pending} video, but this file "
+              f"does not start with a rest without video - not used)")
+
     if not blocks:
         raise RuntimeError("No valid blocks found.")
 
     print(f"  → {sum(b['type']=='base' for b in blocks)} base, "
           f"{sum(b['type']=='video' for b in blocks)} video block(s) found.")
+    if dangling:
+        print(f"  ! file ends during the {dangling} video - its rest may continue "
+              f"in the next file")
 
-    return blocks
+    return blocks, dangling
 
 
 def get_condition_label(video_code):
@@ -321,10 +364,12 @@ def cut_and_save(raw, tmin_s, tmax_s, out_path):
     print(f"    Saved ({raw_cut.times[-1]/60:.2f} min)  ->  {out_path}")
 
 
-def process_file(fif_path, subj_id, raw, base_count, video_count):
+def process_file(fif_path, subj_id, raw, base_count, video_count, pending=None):
     """Cut one raw file. base_count / video_count = number of base / video
     blocks already found in this subject's EARLIER raw files, so numbering
-    continues across split recordings. Returns the updated counts."""
+    continues across split recordings. pending = condition of a video the
+    previous file ended in (see find_key_events).
+    Returns (base_count, video_count, dangling)."""
     fname = os.path.basename(fif_path)
     stem  = os.path.splitext(fname)[0]
     # outputs must start with the subject ID: 2_cut/ is flat, so a raw file
@@ -341,10 +386,10 @@ def process_file(fif_path, subj_id, raw, base_count, video_count):
     print(f"  sfreq={sfreq} Hz | duration={total_dur/60:.2f} min")
 
     try:
-        blocks = find_key_events(raw)
+        blocks, dangling = find_key_events(raw, pending)
     except Exception as e:
         print(f"  X Could not find events: {e}")
-        return base_count, video_count
+        return base_count, video_count, None
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -370,7 +415,7 @@ def process_file(fif_path, subj_id, raw, base_count, video_count):
               f"{tmin_s:.1f}s → {tmax_s:.1f}s ({(tmax_s-tmin_s)/60:.1f} min)")
         cut_and_save(raw, tmin_s, tmax_s, out_path)
 
-    return base_count, video_count
+    return base_count, video_count, dangling
 
 
 def read_raw(fif_path):
@@ -445,11 +490,11 @@ for subj_id in subj_ids:
         print("  ! meas_date missing - using file name order")
 
     # Step 4: process each raw file; block numbering continues across files
-    base_count, video_count = 0, 0
+    base_count, video_count, pending = 0, 0, None
     for fif_path, raw, _ in opened:
         try:
-            base_count, video_count = process_file(
-                fif_path, subj_id, raw, base_count, video_count)
+            base_count, video_count, pending = process_file(
+                fif_path, subj_id, raw, base_count, video_count, pending)
             n_ok += 1
         except Exception as e:
             print(f"  X Error on {os.path.basename(fif_path)}: {e}")

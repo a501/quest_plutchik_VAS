@@ -44,19 +44,10 @@ TRASH_DIR   = os.path.join(SEARCH_ROOT, '_trash_cut_fix')
 SKIP_DIRS   = {'1_raw', '_trash_cut_fix'}   # never touched (top level of SEARCH_ROOT)
 
 # ── Fixes, applied IN THIS ORDER: (old stem, new stem or None = move to trash)
+# The fixes for 046, 054 and 034 were already applied / redone (054 and 034
+# were recut with the new cut script). Do NOT put them back: running
+# ('054_emo_rest_tsss_mc_2b_fear', None) again would trash the CORRECT new file.
 FIXES = [
-    # 046: split recording, sad block in second raw file
-    ('046_emo_rest_3_tsss_mc_2b_sad', '046_emo_rest_3_tsss_mc_3b_sad'),
-
-    # 054: fear trigger sent twice -> keep the later trigger (old 3b)
-    ('054_emo_rest_tsss_mc_2b_fear',  None),
-    ('054_emo_rest_tsss_mc_3b_fear',  '054_emo_rest_tsss_mc_2b_fear'),
-    ('054_emo_rest_tsss_mc_4b_sad',   '054_emo_rest_tsss_mc_3b_sad'),
-
-    # 034: same as 054
-    ('034_emo_rest_tsss_mc_2b_fear',  None),
-    ('034_emo_rest_tsss_mc_3b_fear',  '034_emo_rest_tsss_mc_2b_fear'),
-    ('034_emo_rest_tsss_mc_4b_sad',   '034_emo_rest_tsss_mc_3b_sad'),
 ]
 
 block_re = re.compile(r'^(\d+)_.*_(\d)b_([a-z]+\d*)\.fif$')
