@@ -7,7 +7,7 @@ All behavioural VAS dynamics analyses that do not need mixed models.
 
 Input:  OUT_DIR/vas_probes_long.csv, OUT_DIR/vas_postvideo.csv  (from 1_)
 A "series" = one subject x condition (baseline/sad/fear) x emotion
-(Sadness/Fear), valid (confirmed) ratings only, time in MINUTES from rest onset.
+(Sadness/Fear), all ratings incl. timeouts, time in MINUTES from rest onset.
 
 A  INDUCTION CHECK  (are the two videos equally specific?)
    Post-video ratings (raw, single ratings) + first in-block rating.
@@ -205,7 +205,7 @@ def load(out):
 
 def series_iter(d):
     # Keep ALL probes so probe_idx matches snippet_idx.
-    # Timeout (non-valid) ratings become NaN; fitters drop them but spacing is preserved.
+    # Missing (non-valid) ratings become NaN; fitters drop them but spacing is preserved.
     v = d.copy().sort_values("elapsed_s")
     v["rating"] = v["rating"].where(v["valid"], other=np.nan)
     for (s, c, e), g in v.groupby(["subj", "condition", "emotion"]):
@@ -422,7 +422,7 @@ def section_D(d, out):
 # E coupling
 # ==========================================================================
 def section_E(d, resid, out):
-    # Use all probes; timeout ratings become NaN and dropna removes incomplete pairs only.
+    # Use all probes; missing ratings become NaN and dropna removes incomplete pairs only.
     all_d = d.copy()
     all_d["rating"] = all_d["rating"].where(all_d["valid"], other=np.nan)
     w = all_d.pivot_table(index=["subj", "condition", "probe_idx"], columns="emotion",
@@ -623,7 +623,7 @@ def section_I(d, out):
         vals = {k: {} for k in ("mean", "sd", "exp_tau_min", "resid_sd", "excess_press")}
         for s, x in g.groupby("subj"):
             for half, xx in (("odd", x[x["probe_idx"] % 2 == 1]), ("even", x[x["probe_idx"] % 2 == 0])):
-                xx = xx[xx["valid"]]   # odd/even split on all probe_idx, fit only confirmed
+                xx = xx[xx["valid"]]   # odd/even split on all probe_idx, fit only probes with a rating
                 y, t = xx["rating"].values.astype(float), xx["t_min"].values
                 if len(y) < MIN_VALID // 2 or np.ptp(y) == 0:
                     continue

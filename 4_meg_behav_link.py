@@ -156,7 +156,7 @@ def probe_table(behav_dir):
     d = pd.read_csv(behav_dir / "vas_probes_long.csv", dtype={"subj": str})
     d = d[d["subj"].astype(int) < 200]
     # Keep ALL probes (including timeouts) so probe_idx aligns with snippet_idx.
-    # Timeout ratings are NaN already; confirmed-only flag is preserved in "valid".
+    # Timeouts count as valid ratings; "valid" is False only where the rating is missing.
     d = d.sort_values(["subj", "block", "emotion", "probe_idx"])
     # NaN-out ratings for non-valid probes so they don't contribute to delta,
     # but keep the row so the index sequence stays intact.
@@ -165,7 +165,7 @@ def probe_table(behav_dir):
     d["prev_rating"] = g["rating_for_delta"].shift(1)
     d["prev_idx"] = g["probe_idx"].shift(1)
     # Delta is only meaningful between truly adjacent probes (no gap in index).
-    # A timeout at probe k leaves prev_rating NaN for probe k+1, propagating
+    # A missing rating at probe k leaves prev_rating NaN for probe k+1, propagating
     # the gap correctly without dropping any rows.
     d.loc[d["probe_idx"] - d["prev_idx"] != 1, "prev_rating"] = np.nan
     d["delta"] = d["rating_for_delta"] - d["prev_rating"]

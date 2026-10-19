@@ -5,9 +5,8 @@ Behavioural VAS rest-period timeseries analysis (emo_study).
 For each subject file (dynNNN_results.csv) this script:
   * splits the file into its rest blocks (base, then two emotion blocks),
     using the block definition below,
-  * keeps ONLY within_rest rows (drops post_video) and only CONFIRMED
-    ratings (a timeout leaves the cursor wherever it was, so its value is
-    not a rating),
+  * keeps ONLY within_rest rows (drops post_video). Timeouts are KEPT:
+    a timeout rating is a rating like any other (status is not used),
   * labels the two emotion blocks 'sad' / 'fear' from the video triggers
     of the MEG trigger file (7 = sad, 8 = fear); odd/even subject number
     is only the fallback,
@@ -33,8 +32,10 @@ Block definition (same rules as cut_dyn_blocks_python.py on the MEG side):
   3. Position = number of post_video runs before the run:
         0 -> block 1 = base, 1 -> block 2 = first video, 2 -> block 3 =
         second video. If two complete runs share a position, the one with
-        more confirmed ratings is kept (later one on a tie) and this is
+        more ratings is kept (later one on a tie) and this is
         flagged.
+     A pre-block pair (two rows before block 1 with a small elapsed_s,
+     followed by a jump back) becomes a short run and is dropped by 2.
   4. Which video came first is read from the trigger file
      Behav/MEG_trigger_files/{NNN}_emo_rest_all_triggers.csv. A video
      trigger (7 = sad, 8 = fear) counts only if the next rest_onset (1) ->
@@ -63,8 +64,7 @@ Design decisions for the measures (unchanged):
 Outputs (OUT_DIR = Behav/analysis):
   dyn{NNN}_vas_analysis.csv                    measures, long format
   behav_per_block/dyn{NNN}_block{k}_{role}_behav.csv
-        all within_rest rows of the kept block; 'rating' = confirmed
-        rating (empty for timeouts), 'rating_raw' = value as logged
+        all within_rest rows of the kept block, as logged
   behav_vas_qc.csv                             one row per subject
 
 A subject is SKIPPED if its dyn{NNN}_vas_analysis.csv is newer than its
@@ -532,7 +532,7 @@ def define_blocks(df, subject_id, qc, log):
     for r, g in rest.groupby("_run"):
         last = pd.to_numeric(g["elapsed_s"], errors="coerce").max()
         runs.append(dict(run=r, pos=int(g["_pos"].iloc[0]), n_rows=len(g),
-                         n_valid=int(g["valid"].sum()), last_s=last,
+                         n_valid=int(g["rating"].notna().sum()), last_s=last,
                          complete=bool(np.isfinite(last) and last >= MIN_LAST_PROBE_S)))
     qc["n_rest_runs"] = len(runs)
     flags = []
@@ -569,7 +569,7 @@ def define_blocks(df, subject_id, qc, log):
         keep = max(cand, key=lambda r: (r["n_valid"], r["run"]))
         if len(cand) > 1:
             flags.append(f"{len(cand)} complete runs at block {pos + 1}, "
-                         f"kept run{keep['run'] + 1} ({keep['n_valid']} confirmed ratings)")
+                         f"kept run{keep['run'] + 1} ({keep['n_valid']} ratings)")
         b = df[df["_run"] == keep["run"]].drop(columns=["_run", "_pos"]).copy()
         b.insert(0, "block_num", pos + 1)
         b.insert(1, "block_role", role_of[pos])
@@ -594,15 +594,8 @@ def load_results(subject_id):
         if col not in df.columns:
             raise KeyError(f"column '{col}' missing; has {list(df.columns)}")
     df["emotion"] = df["emotion"].astype(str).str.strip().str.capitalize()
-    df["rating_raw"] = pd.to_numeric(df["rating"], errors="coerce")
-    if "status" in df.columns:
-        status = df["status"].astype(str).str.strip().str.lower()
-        df["valid"] = (status == "confirmed") & df["rating_raw"].notna()
-    else:
-        df["valid"] = df["rating_raw"].notna()
-    # 'rating' = the confirmed rating; a timeout keeps the cursor wherever
-    # it was, so its value is not a rating (kept in rating_raw)
-    df["rating"] = df["rating_raw"].where(df["valid"])
+    # timeouts are kept: status carries no meaning for the rating
+    df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
     return df
 
 
@@ -648,14 +641,12 @@ def process_subject(subject_id):
         for k, bdf in blocks.items():
             role = bdf["block_role"].iloc[0]
             for emo in EMOTIONS:
-                sub = bdf[(bdf["emotion"] == emo) & bdf["valid"]]
+                sub = bdf[(bdf["emotion"] == emo) & bdf["rating"].notna()]
                 t = pd.to_numeric(sub["elapsed_s"], errors="coerce").to_numpy(dtype=float)
                 vals = sub["rating"].to_numpy(dtype=float)
                 good = ~np.isnan(t)
                 t, vals = t[good], vals[good]
-                n_all = int((bdf["emotion"] == emo).sum())
                 qc[f"n_{role}_{emo}"] = len(vals)
-                qc[f"n_timeout_{role}_{emo}"] = n_all - len(vals)
                 if len(vals) == 0:
                     continue
                 meta = {"subject": subject_id,
@@ -667,10 +658,10 @@ def process_subject(subject_id):
 
         out = pd.DataFrame(all_rows)
         out.to_csv(os.path.join(OUT_DIR, f"dyn{subject_id}_vas_analysis.csv"), index=False)
-        counts = "  ".join(f"{b['block_role'].iloc[0]} {int(b['valid'].sum())}/{len(b)}"
+        counts = "  ".join(f"{b['block_role'].iloc[0]} {int(b['rating'].notna().sum())}"
                            for _, b in sorted(blocks.items()))
         log.append(f"  blocks {qc['blocks_found'] or '-'}  (order: {qc['cond_source']})")
-        log.append(f"  confirmed/all ratings: {counts}")
+        log.append(f"  ratings: {counts}")
         qc["status"] = "ok"
     except Exception as e:
         log.append("  X FAILED: " + "".join(traceback.format_exception_only(type(e), e)).strip())
