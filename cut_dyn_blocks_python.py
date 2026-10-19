@@ -138,10 +138,13 @@ def subject_outputs_complete(subj_id):
     Also warns (does not fix) when the outputs look wrong: a block number
     other than 1b-3b (e.g. 4b), a block present more than once, or the two
     video blocks not being one sad + one fear. Such outputs come from the
-    old per-file numbering - fix them with fix_cut_names.py.
-    Returns (complete: bool, missing: list of block labels)
+    old per-file numbering - fix them with fix_double_2b.py (two 2b) or
+    fix_cut_names.py before cutting again.
+    Returns (complete: bool, missing: list of block labels,
+             wrong: bool - True if any WARNING was printed)
     """
     missing = []
+    wrong = False
     conditions = []
     for pattern, label in [
         (f"{subj_id}_*_1b_base*.fif", "1b_base"),
@@ -153,6 +156,7 @@ def subject_outputs_complete(subj_id):
         if not matches:
             missing.append(label)
         elif len(matches) > 1:
+            wrong = True
             print(f"  ! WARNING: {label} exists {len(matches)}x: "
                   f"{[os.path.basename(f) for f in matches]}")
         if label != "1b_base":
@@ -161,11 +165,13 @@ def subject_outputs_complete(subj_id):
     extra = [f for f in glob.glob(os.path.join(OUTPUT_DIR, f"{subj_id}_*_[4-9]b_*.fif"))
              if not split_re.search(f)]
     if extra:
+        wrong = True
         print(f"  ! WARNING: unexpected block number(s): "
               f"{[os.path.basename(f) for f in extra]}")
-    if not missing and sorted(conditions) != ['fear', 'sad']:
+    if len(conditions) >= 2 and sorted(conditions) != ['fear', 'sad']:
+        wrong = True
         print(f"  ! WARNING: video blocks are {conditions}, expected one sad + one fear")
-    return len(missing) == 0, missing
+    return len(missing) == 0, missing, wrong
 
 
 def find_key_events(raw):
@@ -389,13 +395,21 @@ print(f"Found {len(subj_ids)} subject(s): {subj_ids}")
 
 # ── Main loop — per subject ────────────────────────────────────────────────────
 n_ok, n_err, n_skip = 0, 0, 0
+wrong_subjects = []
 
 for subj_id in subj_ids:
     print(f"\n{'='*60}")
     print(f"Subject : {subj_id}")
 
     # Step 1: check output folder
-    complete, missing = subject_outputs_complete(subj_id)
+    complete, missing, wrong = subject_outputs_complete(subj_id)
+    if wrong:
+        # cutting now would add correctly named files NEXT TO the old wrong
+        # ones (same block twice under two names) - fix the names first
+        print(f"  X Old wrongly numbered files in 2_cut/ — subject SKIPPED. "
+              f"Fix names first (fix_double_2b.py / fix_cut_names.py).")
+        wrong_subjects.append(subj_id)
+        continue
     if complete:
         print(f"  -> All 3 blocks exist in 2_cut/ — skipping subject.")
         n_skip += 1
@@ -442,13 +456,18 @@ for subj_id in subj_ids:
             n_err += 1
 
     # Step 5: report final status for this subject
-    complete_after, missing_after = subject_outputs_complete(subj_id)
-    if complete_after:
+    complete_after, missing_after, wrong_after = subject_outputs_complete(subj_id)
+    if wrong_after:
+        print(f"  ! Subject {subj_id} outputs look wrong - see WARNING above")
+        wrong_subjects.append(subj_id)
+    elif complete_after:
         print(f"  ✓ Subject {subj_id} complete.")
     else:
         print(f"  ! Subject {subj_id} still missing: {missing_after}")
 
 print(f"\n{'='*60}")
 print(f"Done — {n_ok} file(s) processed | {n_skip} subject(s) skipped | {n_err} error(s)")
+if wrong_subjects:
+    print(f"Wrongly numbered, NOT processed: {wrong_subjects}")
 print(f"Output dir: {OUTPUT_DIR}")
 print(f"Log file  : {LOG_PATH}")
