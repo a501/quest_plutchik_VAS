@@ -489,8 +489,12 @@ def trigger_video_order(subject_id):
             seq.append(label)
 
     note = "; ".join(f"video ignored ({d})" for d in dropped)
-    if len(seq) == 2 and set(seq) == {"sad", "fear"}:
-        return seq, note
+    if len(seq) >= 2 and set(seq[:2]) == {"sad", "fear"}:
+        if len(seq) > 2:
+            # e.g. the same session twice in the trigger file (_tsss and
+            # _tsss_mc both concatenated by make_emo_rest_triggers.py)
+            note = "; ".join(x for x in (note, f"video sequence {seq}: first two used") if x)
+        return seq[:2], note
     return None, "; ".join(x for x in (note, f"video sequence {seq} not usable") if x)
 
 
