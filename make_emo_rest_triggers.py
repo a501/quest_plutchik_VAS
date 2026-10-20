@@ -31,6 +31,11 @@ PIECE ORDER (from the Windows script)
   The order used is printed per subject -- CHECK IT. If a subject's pieces are
   named so the rule orders them wrongly, the concatenated timeline is wrong.
 
+  Several versions of ONE piece (e.g. emo_rest_tsss.fif and
+  emo_rest_tsss_mc.fif) are not pieces: only one is used, _tsss_mc
+  preferred (same rule as cut_dyn_blocks_python.py). Using both would put
+  the whole session into the CSV twice.
+
   Pieces must share one sampling rate; a mismatch is refused, not guessed.
   The subject is also refused if a piece is AMBIGUOUS, i.e. the file name
   gives no way to order it. Nothing is written in either case.
@@ -219,7 +224,37 @@ def find_files(src, subjects=None):
             if REQUIRE_TSSS and "tsss" not in p.name.lower():
                 continue
             found.setdefault(d.name, []).append((piece_token(p.name, d.name), p))
-    return {s: sorted(v, key=lambda pf: piece_sort_key(pf[0])) for s, v in found.items()}
+    return {s: sorted(one_version_per_piece(s, v), key=lambda pf: piece_sort_key(pf[0]))
+            for s, v in found.items()}
+
+
+def version_rank(path):
+    """Lower = preferred. _tsss_mc over plain _tsss, as in
+    cut_dyn_blocks_python.py. Maxfiltering does not change the trigger
+    channels, so either version gives the same triggers - but only ONE may
+    be used, otherwise the session is concatenated twice."""
+    n = path.name.lower()
+    if re.search(r"_tsss_mc\.fif$", n):
+        return 0
+    if re.search(r"_tsss\.fif$", n):
+        return 1
+    return 2
+
+
+def one_version_per_piece(subj, pieces):
+    """Several files with the same piece id (e.g. emo_rest_tsss.fif and
+    emo_rest_tsss_mc.fif, both 'bare') are versions of ONE recording, not
+    pieces: keep the preferred one."""
+    by_piece = {}
+    for piece, path in pieces:
+        by_piece.setdefault(piece, []).append(path)
+    kept = []
+    for piece, paths in by_piece.items():
+        paths = sorted(paths, key=lambda q: (version_rank(q), str(q)))
+        for q in paths[1:]:
+            print(f"[{subj}] ignoring {q.name} - same recording as {paths[0].name}")
+        kept.append((piece, paths[0]))
+    return kept
 
 
 def main():
