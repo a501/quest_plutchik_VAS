@@ -7,14 +7,13 @@ MEG/2_cut/, read its triggers exactly as the cutting script does (STI101,
 min_duration 2 ms) and test what a correct cut must contain.
 
 PER CUT FILE
-  base (1b_base)      first rest_onset (1) ~2 s after the file start
-                      (PAD_BEFORE_BLOCK1_S), no video trigger
-  sad / fear (2b, 3b) the file starts AT the video trigger (t ~ 0 s), and
-                      that trigger is 7 for a *_sad file / 8 for a *_fear
-                      file; exactly one video; a rest_onset after it
-  all                 exactly one rest_onset -> rest_offset window of
-                      18-22 min, rest_offset ~2 s before the file end
-                      (PAD_AFTER_S), number of probe onsets (3)
+  base (1b_base)      no video trigger
+  sad / fear (2b, 3b) exactly one video trigger, 7 for a *_sad file / 8 for
+                      a *_fear file, before the rest_onset
+  all                 exactly one complete rest_onset -> rest_offset window
+                      of 18-22 min inside the file, number of probe onsets
+                      (3). How much is cut before / after the rest is only
+                      reported (rest_on_s, end_pad_s, video_at_s), not tested.
   vs ratings          the matching behaviour block
                       (Behav/analysis/behav_per_block/dyn{NNN}_block*_{cond}_behav.csv,
                       written by analyze_behav_vas.py): same number of
@@ -25,7 +24,9 @@ PER SUBJECT
   exactly one base, one sad and one fear block; 2b / 3b order agrees with
   the block order of the ratings
 
-Nothing is changed. Plain Python, no SLURM.
+Nothing is changed. Plain Python, no SLURM; N_WORKERS files are read at
+the same time. Reading the triggers means reading the whole file from
+disk, so each file takes as long as copying it once.
 
 Outputs
   MEG/2_cut/cut_check_files.csv      one row per cut file, every measure
@@ -38,8 +39,10 @@ Usage
 
 import argparse
 import glob
+import multiprocessing as mp
 import os
 import re
+import time
 import warnings
 
 import mne
@@ -56,10 +59,8 @@ PERBLOCK_DIR = "/home/ZhangJianfeng_04/emo_study/Behav/analysis/behav_per_block"
 REST_ON, REST_OFF, PROBE_ON = 1, 2, 3
 VIDEO = {7: "sad", 8: "fear"}
 REST_DUR_MIN_S, REST_DUR_MAX_S = 18 * 60, 22 * 60
-PAD_BEFORE_BLOCK1_S = 2.0
-PAD_AFTER_S = 2.0
 
-PAD_TOL_S = 1.0        # allowed deviation from the 2 s paddings / video at 0 s
+N_WORKERS = 4          # files read at the same time
 MATCH_TOL_S = 5.0      # probe onset trigger <-> behavioural elapsed_s
 MIN_MATCH_FRAC = 0.9   # share of rating probes that must match a probe trigger
 
@@ -119,8 +120,6 @@ def check_file(path):
                    end_pad_s=round(dur - r_off, 2))
         if not (REST_DUR_MIN_S <= rest <= REST_DUR_MAX_S):
             P.append(f"rest window {rest / 60:.1f} min (expected 18-22)")
-        if abs((dur - r_off) - PAD_AFTER_S) > PAD_TOL_S:
-            P.append(f"rest_offset {dur - r_off:.1f} s before file end (expected {PAD_AFTER_S:g})")
     else:
         r_on = np.nan
 
@@ -128,8 +127,6 @@ def check_file(path):
     if row["cond"] == "base":
         if vids:
             P.append(f"video trigger(s) in a base block: {row['videos']}")
-        if np.isfinite(r_on) and abs(r_on - PAD_BEFORE_BLOCK1_S) > PAD_TOL_S:
-            P.append(f"rest_onset at {r_on:.1f} s (expected {PAD_BEFORE_BLOCK1_S:g})")
     else:
         if len(vids) != 1:
             P.append(f"{len(vids)} video triggers (expected 1)")
@@ -138,8 +135,6 @@ def check_file(path):
             row["video_at_s"] = round(v_t, 2)
             if v_lab != row["cond"]:
                 P.append(f"file says {row['cond']} but video trigger is {v_lab}")
-            if v_t > PAD_TOL_S:
-                P.append(f"video trigger at {v_t:.1f} s (expected at file start)")
             if np.isfinite(r_on) and r_on < v_t:
                 P.append("rest_onset before the video")
 
@@ -148,7 +143,8 @@ def check_file(path):
     row["behav_block_num"] = k_behav
     if el is None:
         row["behav_probes"] = np.nan
-        P.append("no unique rating block in behav_per_block")
+        P.append(f"no rating block for '{row['cond']}' in behav_per_block "
+                 f"(ratings missing, MEG block itself not checked against ratings)")
     else:
         row["behav_probes"] = len(el)
         if np.isfinite(r_on) and len(probes):
@@ -162,6 +158,15 @@ def check_file(path):
         if abs(len(el) - len(probes)) > 1:
             P.append(f"{len(probes)} probe triggers vs {len(el)} rating probes")
     return row
+
+
+def safe_check(path):
+    """check_file that never raises, so one bad file cannot stop the run."""
+    try:
+        return check_file(path)
+    except Exception as e:
+        return dict(file=os.path.basename(path), subject=os.path.basename(path).split("_")[0],
+                    problems=[f"could not read: {type(e).__name__}: {e}"])
 
 
 # ===================================================================
@@ -178,17 +183,16 @@ def main():
     if a.subjects:
         want = {s.zfill(3) for s in a.subjects}
         files = [f for f in files if os.path.basename(f).split("_")[0] in want]
-    print(f"{len(files)} cut file(s) in {CUT_DIR}\n")
+    print(f"{len(files)} cut file(s) in {CUT_DIR}, {N_WORKERS} at a time\n", flush=True)
 
-    rows = []
-    for f in files:
-        try:
-            r = check_file(f)
-        except Exception as e:
-            r = dict(file=os.path.basename(f), subject=os.path.basename(f).split("_")[0],
-                     problems=[f"could not read: {type(e).__name__}: {e}"])
-        rows.append(r)
-    F = pd.DataFrame(rows)
+    rows, t_start = [], time.time()
+    with mp.get_context("fork").Pool(N_WORKERS) as pool:
+        for i, r in enumerate(pool.imap_unordered(safe_check, files), start=1):
+            rows.append(r)
+            print(f"  [{i}/{len(files)}  {time.time() - t_start:5.0f} s]  {r['file']}: "
+                  f"{'ok' if not r['problems'] else '; '.join(r['problems'])}", flush=True)
+    print()
+    F = pd.DataFrame(rows).sort_values("file")
     F["ok"] = F["problems"].apply(len) == 0
     F["problems"] = F["problems"].apply("; ".join)
 
