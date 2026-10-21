@@ -97,6 +97,8 @@ def check_file(path):
         warnings.simplefilter("ignore")
         raw = mne.io.read_raw_fif(path, preload=False, verbose=False)
     sf, dur = raw.info["sfreq"], raw.times[-1]
+    raw.pick(["STI101"])
+    raw.load_data()
     # initial_event=True: a video block is cut to start exactly at the video
     # trigger, which is then already "on" at the first sample and would be
     # missed by the default find_events
@@ -186,7 +188,7 @@ def main():
     print(f"{len(files)} cut file(s) in {CUT_DIR}, {N_WORKERS} at a time\n", flush=True)
 
     rows, t_start = [], time.time()
-    with mp.get_context("fork").Pool(N_WORKERS) as pool:
+    with mp.get_context("spawn").Pool(N_WORKERS) as pool:
         for i, r in enumerate(pool.imap_unordered(safe_check, files), start=1):
             rows.append(r)
             print(f"  [{i}/{len(files)}  {time.time() - t_start:5.0f} s]  {r['file']}: "
