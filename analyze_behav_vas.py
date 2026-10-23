@@ -118,6 +118,21 @@ QC_FILE = os.path.join(OUT_DIR, "behav_vas_qc.csv")
 
 SUBJ_MAX = 200         # analyse subjects with ID < SUBJ_MAX (repeat visits 2xx/3xx excluded)
 
+# ---- sessions saved in several result files -------------------------
+# The task was restarted under another ID; the later file is read directly
+# after the subject's own file, as one session. The part IDs are never
+# analysed as subjects of their own.
+SESSION_PARTS = {"034": ["134"], "036": ["136"]}
+PART_IDS = {p for parts in SESSION_PARTS.values() for p in parts}
+
+# Condition of every post_video run of the merged session, in order, for
+# sessions where the trigger file cannot give it (a video was repeated or a
+# rest window has no offset). Checked against the MEG VAS-trigger timing:
+#   034: fear #1, [crash - sad #1 not saved], fear #2 (repeat), sad #2
+#   036: fear, sad (MEG recording of the sad rest ends after 13 min)
+VIDEO_SEQUENCE_OVERRIDE = {"034": ["fear", "fear", "sad"],
+                           "036": ["fear", "sad"]}
+
 EMOTIONS = ["Sadness", "Fear"]
 
 # ---- block definition ---------------------------------------------
@@ -553,11 +568,18 @@ def define_blocks(df, subject_id, qc, log):
     if qc["order_conflict"]:
         log.append(f"  !! video order: triggers {qc['order_triggers']} vs "
                    f"parity {qc['order_parity']} -> using triggers")
-    elif not order_trg:
+    elif not order_trg and subject_id not in VIDEO_SEQUENCE_OVERRIDE:
         log.append(f"  ! video order from parity ({tnote})")
     role_of = {0: "base", 1: order[0], 2: order[1]}
+    if subject_id in VIDEO_SEQUENCE_OVERRIDE:
+        seq = VIDEO_SEQUENCE_OVERRIDE[subject_id]
+        role_of = {0: "base", **{k + 1: c for k, c in enumerate(seq)}}
+        qc["cond_source"] = "override"
+        log.append(f"  video sequence from VIDEO_SEQUENCE_OVERRIDE: {'-'.join(seq)}")
 
-    blocks = {}
+    # first complete block of each condition is kept, later repeats are
+    # dropped (same rule as cut_dyn_blocks_python.py)
+    blocks, used = {}, set()
     for pos in sorted({r["pos"] for r in runs}):
         cand = [r for r in runs if r["pos"] == pos and r["complete"]]
         if not cand:
@@ -566,15 +588,21 @@ def define_blocks(df, subject_id, qc, log):
             flags.append(f"{len(cand)} complete run(s) after video {pos} dropped "
                          f"(only 2 videos expected)")
             continue
+        role = role_of[pos]
+        if role in used:
+            flags.append(f"block after video {pos} ({role}) dropped: repeat of {role}")
+            continue
+        num = 1 if role == "base" else 2 + sum(r != "base" for r in used)
+        used.add(role)
         keep = max(cand, key=lambda r: (r["n_valid"], r["run"]))
         if len(cand) > 1:
-            flags.append(f"{len(cand)} complete runs at block {pos + 1}, "
+            flags.append(f"{len(cand)} complete runs at block {num}, "
                          f"kept run{keep['run'] + 1} ({keep['n_valid']} confirmed ratings)")
         b = df[df["_run"] == keep["run"]].drop(columns=["_run", "_pos"]).copy()
-        b.insert(0, "block_num", pos + 1)
-        b.insert(1, "block_role", role_of[pos])
+        b.insert(0, "block_num", num)
+        b.insert(1, "block_role", role)
         b.insert(2, "cond_source", qc["cond_source"] if pos else "")
-        blocks[pos + 1] = b.reset_index(drop=True)
+        blocks[num] = b.reset_index(drop=True)
 
     if len(blocks) != 3:
         flags.append(f"{len(blocks)} block(s) found (expected 3)")
@@ -587,8 +615,10 @@ def define_blocks(df, subject_id, qc, log):
 
 
 def load_results(subject_id):
-    fpath = os.path.join(BEHAV_DIR, f"dyn{subject_id}_results.csv")
-    df = pd.read_csv(fpath)
+    """dyn{subject}_results.csv, followed by its SESSION_PARTS files."""
+    parts = [subject_id] + SESSION_PARTS.get(subject_id, [])
+    df = pd.concat([pd.read_csv(os.path.join(BEHAV_DIR, f"dyn{p}_results.csv"))
+                    for p in parts], ignore_index=True)
     df.columns = df.columns.str.strip().str.lower()
     for col in ("context", "elapsed_s", "emotion", "rating"):
         if col not in df.columns:
@@ -683,7 +713,8 @@ def is_done(subject_id):
     out = os.path.join(OUT_DIR, f"dyn{subject_id}_vas_analysis.csv")
     if not os.path.exists(out):
         return False
-    inputs = [os.path.join(BEHAV_DIR, f"dyn{subject_id}_results.csv"),
+    inputs = [os.path.join(BEHAV_DIR, f"dyn{p}_results.csv")
+              for p in [subject_id] + SESSION_PARTS.get(subject_id, [])] + [
               os.path.join(TRIG_DIR, f"{subject_id}_emo_rest_all_triggers.csv")]
     newest = max(os.path.getmtime(p) for p in inputs if os.path.exists(p))
     return os.path.getmtime(out) >= newest
@@ -697,7 +728,8 @@ def main():
     a = ap.parse_args()
 
     found = sorted(m.group(1) for p in glob.glob(os.path.join(BEHAV_DIR, "dyn*_results.csv"))
-                   if (m := re.match(r"dyn(\d+)_results\.csv$", os.path.basename(p))))
+                   if (m := re.match(r"dyn(\d+)_results\.csv$", os.path.basename(p)))
+                   and m.group(1) not in PART_IDS)
     if a.subjects:
         want = {s.zfill(3) for s in a.subjects}
         missing = sorted(want - set(found))

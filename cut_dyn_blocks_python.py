@@ -29,6 +29,14 @@ starts with a rest that has no video trigger before it, that rest is the
 video's block (labelled with the video's condition, cut from rest_onset - 2 s;
 the video itself is not in that file). The log says so.
 
+Recording stopped during a rest (e.g. 036 sad): a video rest without
+rest_offset that runs to the end of the file is kept as a PARTIAL block if
+it lasted at least PARTIAL_REST_MIN_S.
+
+Repeated conditions (e.g. 034, where fear and sad were shown again after a
+crash): only the FIRST valid block of each condition is cut; later repeats
+are skipped and logged.
+
 Log file: everything printed is also written to
   {OUTPUT_DIR}/logs/cut_dyn_blocks_YYYYmmdd_HHMMSS.log
 
@@ -78,6 +86,9 @@ VIDEO_FEAR_CODE  =  8
 # ── Rest duration validation ───────────────────────────────────────────────────
 REST_DUR_MIN_S = 18 * 60   # below this = aborted/practice run
 REST_DUR_MAX_S = 22 * 60   # above this = something wrong
+PARTIAL_REST_MIN_S = 10 * 60   # a video rest cut off by the END OF THE FILE
+                               # (no rest_offset, recording stopped) is kept
+                               # as a partial block if at least this long
 
 # ── Padding ────────────────────────────────────────────────────────────────────
 PAD_BEFORE_BLOCK1_S = 2.0   # seconds before rest_onset, block 1 only
@@ -254,6 +265,18 @@ def find_key_events(raw, pending=None):
 
         next_off = rest_off_all[rest_off_all > ron]
         if len(next_off) == 0:
+            rec = total_dur - to_s(ron)
+            if is_last and rec >= PARTIAL_REST_MIN_S:
+                print(f"  ✓ video {label} t={t_vid:.1f}s → rest {to_s(ron):.1f}s–END of file "
+                      f"({rec/60:.1f} min, no rest_offset) → PARTIAL block")
+                blocks.append({
+                    'type'       : 'video',
+                    'condition'  : label,
+                    'tmin_s'     : t_vid,
+                    'tmax_s'     : total_dur,
+                    'roff_sample': first_samp + len(raw.times) - 1,
+                })
+                continue
             print(f"  ! video {label} t={t_vid:.1f}s → no rest_offset after rest_onset → SKIP")
             if is_last:
                 dangling = label
@@ -364,12 +387,17 @@ def cut_and_save(raw, tmin_s, tmax_s, out_path):
     print(f"    Saved ({raw_cut.times[-1]/60:.2f} min)  ->  {out_path}")
 
 
-def process_file(fif_path, subj_id, raw, base_count, video_count, pending=None):
+def process_file(fif_path, subj_id, raw, base_count, video_count, pending=None,
+                 done_conditions=None):
     """Cut one raw file. base_count / video_count = number of base / video
     blocks already found in this subject's EARLIER raw files, so numbering
     continues across split recordings. pending = condition of a video the
-    previous file ended in (see find_key_events).
+    previous file ended in (see find_key_events). done_conditions = video
+    conditions already cut from earlier blocks of this subject (updated here;
+    repeats are skipped).
     Returns (base_count, video_count, dangling)."""
+    if done_conditions is None:
+        done_conditions = set()
     fname = os.path.basename(fif_path)
     stem  = os.path.splitext(fname)[0]
     # outputs must start with the subject ID: 2_cut/ is flat, so a raw file
@@ -403,6 +431,11 @@ def process_file(fif_path, subj_id, raw, base_count, video_count, pending=None):
             out_path = os.path.join(OUTPUT_DIR, f"{stem}{suffix}.fif")
             base_count += 1
         else:
+            if condition in done_conditions:
+                print(f"  ✗ {condition} block {tmin_s:.1f}s → repeat of an earlier "
+                      f"{condition} block → SKIP (first one is kept)")
+                continue
+            done_conditions.add(condition)
             block_num  = 2 + video_count
             out_path   = os.path.join(OUTPUT_DIR, f"{stem}_{block_num}b_{condition}.fif")
             video_count += 1
@@ -490,11 +523,12 @@ for subj_id in subj_ids:
         print("  ! meas_date missing - using file name order")
 
     # Step 4: process each raw file; block numbering continues across files
-    base_count, video_count, pending = 0, 0, None
+    base_count, video_count, pending, done_conditions = 0, 0, None, set()
     for fif_path, raw, _ in opened:
         try:
             base_count, video_count, pending = process_file(
-                fif_path, subj_id, raw, base_count, video_count, pending)
+                fif_path, subj_id, raw, base_count, video_count, pending,
+                done_conditions)
             n_ok += 1
         except Exception as e:
             print(f"  X Error on {os.path.basename(fif_path)}: {e}")

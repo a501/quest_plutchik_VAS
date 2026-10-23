@@ -84,6 +84,16 @@ VAS_START, VAS_STEP, VAS_MIN, VAS_MAX = 50, 5, 0, 100
 C_REST_ON, C_REST_OFF, C_PROBE_ON, C_SCREEN = 1, 2, 3, 4
 C_VSAD, C_VFEAR, C_LEFT, C_RIGHT, C_CONF, C_PROBE_OFF = 7, 8, 11, 12, 13, 14
 
+# Sessions saved in several result files (task restarted under another ID):
+# the part files are read directly after the subject's own file, and the
+# part IDs are never treated as subjects. Same lists in analyze_behav_vas.py.
+SESSION_PARTS = {"034": ["134"], "036": ["136"]}
+PART_IDS = {p for parts in SESSION_PARTS.values() for p in parts}
+# condition of every post_video run of the merged session; the first block
+# of each condition is kept, later repeats are dropped
+VIDEO_SEQUENCE_OVERRIDE = {"034": ["fear", "fear", "sad"],
+                           "036": ["fear", "sad"]}
+
 
 # --------------------------------------------------------------------------
 # behavioural file
@@ -98,14 +108,18 @@ def norm_emotion(x):
 
 
 def load_behav(subj):
-    path = RAW_DIR / f"dyn{subj}_results.csv"
-    df = pd.read_csv(path)
-    df.columns = df.columns.str.strip().str.lower()
-    for col in ("context", "elapsed_s", "emotion", "rating"):
-        if col not in df.columns:
-            raise KeyError(f"{path.name}: column '{col}' missing; has {list(df.columns)}")
-    if DROP_FIRST_PAIR:
-        df = df.iloc[2:].reset_index(drop=True)
+    frames = []
+    for i, part in enumerate([subj] + SESSION_PARTS.get(subj, [])):
+        path = RAW_DIR / f"dyn{part}_results.csv"
+        d = pd.read_csv(path)
+        d.columns = d.columns.str.strip().str.lower()
+        for col in ("context", "elapsed_s", "emotion", "rating"):
+            if col not in d.columns:
+                raise KeyError(f"{path.name}: column '{col}' missing; has {list(d.columns)}")
+        if DROP_FIRST_PAIR and i == 0:     # a part file starts with post_video rows
+            d = d.iloc[2:]
+        frames.append(d)
+    df = pd.concat(frames, ignore_index=True)
     df["emotion"] = df["emotion"].map(norm_emotion)
     df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
     df["elapsed_s"] = pd.to_numeric(df["elapsed_s"], errors="coerce")
@@ -263,6 +277,18 @@ def process_subject(subj):
     qc["order_parity"] = "-".join(order_par)
     qc["order_triggers"] = "-".join(order_trg) if order_trg else ""
     qc["order_conflict"] = bool(order_trg and order_trg != order_par)
+    if subj in VIDEO_SEQUENCE_OVERRIDE:
+        # keep the first video run of each condition, renumber the blocks
+        seq, keep, seen = VIDEO_SEQUENCE_OVERRIDE[subj], [], set()
+        for k, c in enumerate(seq, start=1):
+            if c not in seen:
+                keep.append(k)
+                seen.add(c)
+        b["block"] = b["block"].map({1: 1, **{r + 1: i + 2 for i, r in enumerate(keep)}})
+        b["post_run"] = b["post_run"].map({r: i + 1 for i, r in enumerate(keep)})
+        b = b[b["block"].notna() | b["post_run"].notna()]
+        order = [seq[r - 1] for r in keep]
+        qc["cond_source"] = "override"
     cond_of_block = {1: "baseline", 2: order[0], 3: order[1]}
     vorder = {order[0]: 1, order[1]: 2}
 
@@ -400,7 +426,7 @@ def main():
     subs = [s.zfill(3) for s in a.subjects] if a.subjects else sorted(
         m.group(1) for p in RAW_DIR.glob("dyn*_results.csv")
         if (m := re.match(r"dyn(\d+)_results\.csv$", p.name)))
-    subs = [s for s in subs if int(s) < 200]
+    subs = [s for s in subs if int(s) < 200 and s not in PART_IDS]
     print(f"{len(subs)} subjects")
 
     longs, pvs, qcs = [], [], []

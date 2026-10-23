@@ -88,6 +88,16 @@ VAS_ANALYSIS = BASE / "analysis"                 # dyn{NNN}_vas_analysis.csv
 VAS_PERBLOCK = BASE / "analysis/behav_per_block"
 VAS_RAW      = BASE / "raw"                      # dyn{NNN}_results.csv
 
+# Sessions saved in several result files (task restarted under another ID):
+# the part files are read directly after the subject's own file, and the
+# part IDs are never treated as subjects. Same lists in analyze_behav_vas.py.
+SESSION_PARTS = {"034": ["134"], "036": ["136"]}
+PART_IDS = {p for parts in SESSION_PARTS.values() for p in parts}
+# condition of every post_video run of the merged session; the first block
+# of each condition is kept, later repeats are dropped
+VIDEO_SEQUENCE_OVERRIDE = {"034": ["fear", "fear", "sad"],
+                           "036": ["fear", "sad"]}
+
 OUT_DIR = BASE / "analysis/corr_all_modalities"
 
 # Both correlation methods are run in a single pass, each into its own
@@ -285,7 +295,7 @@ def load_vas_dynamics():
     frames = []
     for f in files:
         m = re.search(r"dyn(\d+)_vas_analysis", f.name)
-        if not m:
+        if not m or m.group(1) in PART_IDS:
             continue
         d = pd.read_csv(f)
         d["subject"] = int(m.group(1))
@@ -461,10 +471,12 @@ def load_vas_single_ratings(video_order):
     rows = {}
     for f in files:
         m = re.search(r"dyn(\d+)_results", f.name)
-        if not m:
+        if not m or m.group(1) in PART_IDS:
             continue
         subj = int(m.group(1))
-        d = pd.read_csv(f)
+        d = pd.concat([pd.read_csv(VAS_RAW / f"dyn{p}_results.csv")
+                       for p in [m.group(1)] + SESSION_PARTS.get(m.group(1), [])],
+                      ignore_index=True)
         ctx = _find_col(d, ["context"])
         emo_col = _find_col(d, ["emotion"])
         rating_col = _find_col(d, ["rating", "response", "vas", "value"])
@@ -489,11 +501,18 @@ def load_vas_single_ratings(video_order):
 
         # ---- post-video: keyed by which video preceded ----
         pv = d[ctx_s == "post_video"].copy()
-        if len(pv) and subj in video_order.index:
+        override = VIDEO_SEQUENCE_OVERRIDE.get(m.group(1))
+        if len(pv) and (override or subj in video_order.index):
             pv = pv.sort_values("_row")
             pv["event_idx"] = pv.groupby(emo_col).cumcount() + 1
-            idx2cond = {video_order.loc[subj, "sad_video_order"]: "sad",
-                        video_order.loc[subj, "fear_video_order"]: "fear"}
+            if override:       # first video of each condition, repeats dropped
+                idx2cond = {}
+                for k, c in enumerate(override, start=1):
+                    if c not in idx2cond.values():
+                        idx2cond[k] = c
+            else:
+                idx2cond = {video_order.loc[subj, "sad_video_order"]: "sad",
+                            video_order.loc[subj, "fear_video_order"]: "fear"}
             for _, r in pv.iterrows():
                 cond = idx2cond.get(int(r["event_idx"]))
                 if cond and pd.notna(r[rating_col]):
@@ -1189,7 +1208,8 @@ def main():
     if INCLUDE_POST_VIDEO:
         vas_subjects = sorted({int(re.search(r"dyn(\d+)_results", f.name).group(1))
                                for f in VAS_RAW.glob("dyn*_results.csv")
-                               if re.search(r"dyn(\d+)_results", f.name)})
+                               if re.search(r"dyn(\d+)_results", f.name)
+                               and re.search(r"dyn(\d+)_results", f.name).group(1) not in PART_IDS})
         video_order = build_video_order(vas_subjects)
         outcomes["vasraw"] = load_vas_single_ratings(video_order)
 
