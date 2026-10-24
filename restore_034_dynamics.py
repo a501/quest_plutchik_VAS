@@ -50,7 +50,7 @@ def is_fear2(value: str) -> bool:
     return any(p in v for p in FEAR2_PATTERNS)
 
 
-def find_block_col(df: pd.DataFrame) -> str | None:
+def find_block_col(df: pd.DataFrame):
     """Return the first column whose values look like block labels."""
     candidates = [c for c in df.columns
                   if re.search(r'block|cond|label', c, re.I)]
