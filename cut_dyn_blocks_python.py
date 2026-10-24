@@ -33,10 +33,12 @@ Recording stopped during a rest (e.g. 036 sad): a video rest without
 rest_offset that runs to the end of the file is kept as a PARTIAL block if
 it lasted at least PARTIAL_REST_MIN_S.
 
-Repeated conditions (a video condition with more than one valid block,
-e.g. 034 where fear was shown again after a crash): the script does NOT
-choose. Which occurrence to cut must be written in REPEAT_CHOICE; without an
-entry the subject is NOT cut at all and is reported at the end.
+Repeated conditions (a video condition with more than one VALID block, i.e.
+each followed by a complete 18-22 min rest, e.g. 034 where fear was shown
+again after a crash): ALL valid blocks are cut. They share the block number
+of the condition's first occurrence and get an occurrence index:
+  034_..._2b_1_fear.fif, 034_..._2b_2_fear.fif, 034_..._3b_sad.fif
+Which one to use is decided later; the log lists them.
 
 Log file: everything printed is also written to
   {OUTPUT_DIR}/logs/cut_dyn_blocks_YYYYmmdd_HHMMSS.log
@@ -92,15 +94,6 @@ REST_DUR_MAX_S = 22 * 60   # above this = something wrong
 PARTIAL_REST_MIN_S = 10 * 60   # a video rest cut off by the END OF THE FILE
                                # (no rest_offset, recording stopped) is kept
                                # as a partial block if at least this long
-
-# ── Repeated conditions: which valid occurrence to cut (1 = first) ──────────
-# Decided per subject after checking the data, never automatically.
-#   034: fear #1 complete (MEG + dyn034 ratings); the program crashed in
-#        sad #1 (no ratings, no rest_offset) and the restart (dyn134) showed
-#        fear again -> fear #1 = first exposure is used.
-REPEAT_CHOICE = {
-    '034': {'fear': 1},
-}
 
 # ── Padding ────────────────────────────────────────────────────────────────────
 PAD_BEFORE_BLOCK1_S = 2.0   # seconds before rest_onset, block 1 only
@@ -184,12 +177,13 @@ def subject_outputs_complete(subj_id):
                    if not split_re.search(f)]
         if not matches:
             missing.append(label)
-        elif len(matches) > 1:
+        elif len(matches) > 1 and not all(re.search(r'_\db_\d+_[a-z]+\.fif$', f)
+                                          for f in matches):
             wrong = True
             print(f"  ! WARNING: {label} exists {len(matches)}x: "
                   f"{[os.path.basename(f) for f in matches]}")
         if label != "1b_base":
-            conditions += [re.search(r'_\db_([a-z]+)\.fif$', f).group(1)
+            conditions += [re.search(r'_\db_(?:\d+_)?([a-z]+)\.fif$', f).group(1)
                            for f in matches]
     extra = [f for f in glob.glob(os.path.join(OUTPUT_DIR, f"{subj_id}_*_[4-9]b_*.fif"))
              if not split_re.search(f)]
@@ -197,7 +191,7 @@ def subject_outputs_complete(subj_id):
         wrong = True
         print(f"  ! WARNING: unexpected block number(s): "
               f"{[os.path.basename(f) for f in extra]}")
-    if len(conditions) >= 2 and sorted(conditions) != ['fear', 'sad']:
+    if len(conditions) >= 2 and sorted(set(conditions)) != ['fear', 'sad']:
         wrong = True
         print(f"  ! WARNING: video blocks are {conditions}, expected one sad + one fear")
     return len(missing) == 0, missing, wrong
@@ -400,14 +394,14 @@ def cut_and_save(raw, tmin_s, tmax_s, out_path):
 
 
 def process_file(fif_path, subj_id, raw, base_count, video_count, pending=None,
-                 cond_seen=None, skip_conditions=()):
+                 cond_seen=None, repeated=()):
     """Cut one raw file. base_count / video_count = number of base / video
     blocks already found in this subject's EARLIER raw files, so numbering
     continues across split recordings. pending = condition of a video the
-    previous file ended in (see find_key_events). cond_seen = number of valid
-    blocks per condition in this subject's earlier files (updated here);
-    only the occurrence chosen in REPEAT_CHOICE of a repeated condition is
-    cut, and no block of a condition in skip_conditions.
+    previous file ended in (see find_key_events). cond_seen = {condition:
+    (block number, valid blocks so far)} from earlier files (updated here).
+    repeated = conditions with more than one valid block in the subject;
+    their blocks get an occurrence index (2b_1_fear, 2b_2_fear).
     Returns (base_count, video_count, dangling)."""
     if cond_seen is None:
         cond_seen = {}
@@ -444,20 +438,18 @@ def process_file(fif_path, subj_id, raw, base_count, video_count, pending=None,
             out_path = os.path.join(OUTPUT_DIR, f"{stem}{suffix}.fif")
             base_count += 1
         else:
-            cond_seen[condition] = cond_seen.get(condition, 0) + 1
-            occ = cond_seen[condition]
-            if condition in skip_conditions:
-                print(f"  X {condition} block {tmin_s:.1f}s (occurrence {occ}) → NOT cut: "
-                      f"{condition} is repeated, no REPEAT_CHOICE entry")
-                continue
-            want = REPEAT_CHOICE.get(subj_id, {}).get(condition)
-            if want is not None and occ != want:
-                print(f"  ✗ {condition} block {tmin_s:.1f}s (occurrence {occ}) → SKIP "
-                      f"(REPEAT_CHOICE uses occurrence {want})")
-                continue
-            block_num  = 2 + video_count
-            out_path   = os.path.join(OUTPUT_DIR, f"{stem}_{block_num}b_{condition}.fif")
-            video_count += 1
+            if condition not in cond_seen:          # first occurrence: new block number
+                cond_seen[condition] = (2 + video_count, 0)
+                video_count += 1
+            block_num, occ = cond_seen[condition]
+            occ += 1
+            cond_seen[condition] = (block_num, occ)
+            tag = f"{block_num}b_{occ}_{condition}" if condition in repeated \
+                else f"{block_num}b_{condition}"
+            if condition in repeated:
+                print(f"  ! {condition} block {tmin_s:.1f}s = occurrence {occ} of a "
+                      f"repeated condition → {tag}")
+            out_path   = os.path.join(OUTPUT_DIR, f"{stem}_{tag}.fif")
 
         if os.path.isfile(out_path):
             print(f"  {os.path.basename(out_path)} already exists — skipping.")
@@ -493,6 +485,7 @@ print(f"Found {len(subj_ids)} subject(s): {subj_ids}")
 # ── Main loop — per subject ────────────────────────────────────────────────────
 n_ok, n_err, n_skip = 0, 0, 0
 wrong_subjects = []
+repeated_subjects = []
 
 for subj_id in subj_ids:
     print(f"\n{'='*60}")
@@ -553,28 +546,18 @@ for subj_id in subj_ids:
         for b in blks:
             if b['type'] == 'video':
                 counts[b['condition']] = counts.get(b['condition'], 0) + 1
-    skip_conditions = set()
-    for cond, n in counts.items():
-        if n > 1:
-            choice = REPEAT_CHOICE.get(subj_id, {}).get(cond)
-            if choice is None:
-                print(f"  ! {cond} has {n} valid blocks and no REPEAT_CHOICE entry "
-                      f"for {subj_id} → subject NOT cut. Check the data and "
-                      f"add e.g. REPEAT_CHOICE['{subj_id}'] = {{'{cond}': 1}}")
-                skip_conditions.add(cond)
-                wrong_subjects.append(subj_id)
-            else:
-                print(f"  {cond} has {n} valid blocks → occurrence {choice} is used "
-                      f"(REPEAT_CHOICE)")
-    if skip_conditions:
-        continue
+    repeated = {c for c, n in counts.items() if n > 1}
+    for c in sorted(repeated):
+        print(f"  ! {c} has {counts[c]} valid blocks (each with a complete rest) "
+              f"→ all are cut, numbered _1, _2, ...")
+        repeated_subjects.append(subj_id)
 
     base_count, video_count, pending, cond_seen = 0, 0, None, {}
     for fif_path, raw, _ in opened:
         try:
             base_count, video_count, pending = process_file(
                 fif_path, subj_id, raw, base_count, video_count, pending,
-                cond_seen, skip_conditions)
+                cond_seen, repeated)
             n_ok += 1
         except Exception as e:
             print(f"  X Error on {os.path.basename(fif_path)}: {e}")
@@ -593,7 +576,10 @@ for subj_id in subj_ids:
 print(f"\n{'='*60}")
 print(f"Done — {n_ok} file(s) processed | {n_skip} subject(s) skipped | {n_err} error(s)")
 if wrong_subjects:
-    print(f"NOT processed (wrong old names or repeated condition, see ! above): "
+    print(f"NOT processed (wrong old names, see ! above): "
           f"{sorted(set(wrong_subjects))}")
+if repeated_subjects:
+    print(f"Repeated condition, several blocks cut (choose later): "
+          f"{sorted(set(repeated_subjects))}")
 print(f"Output dir: {OUTPUT_DIR}")
 print(f"Log file  : {LOG_PATH}")

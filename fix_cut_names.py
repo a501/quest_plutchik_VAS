@@ -48,18 +48,20 @@ SKIP_DIRS   = {'1_raw', '_trash_cut_fix'}   # never touched (top level of SEARCH
 # were recut with the new cut script). Do NOT put them back: running
 # ('054_emo_rest_tsss_mc_2b_fear', None) again would trash the CORRECT new file.
 FIXES = [
-    # 034 (Oct 2026): blocks were cut as 2b_fear (fear #1), 3b_fear (fear #2,
-    # shown again after the crash in sad #1), 4b_sad (sad #2).
-    # Decision: fear #1 + sad #2 -> fear #2 to trash, 4b_sad -> 3b_sad.
-    ('034_emo_rest_tsss_mc_3b_fear', None),
-    ('034_3b_fear',                  None),      # its STCs (034_3b_fear_ecg_eloreta-lh.stc)
-    ('034_ecg_label_tc',             None),      # block labels stored inside -> recompute
-    ('034_eog_label_tc',             None),
+    # 034: cut as 2b_fear (fear #1), 3b_fear (fear #2, repeated after the
+    # crash in sad #1), 4b_sad (sad #2). Both fear blocks have a complete
+    # rest, so both are kept and numbered as the cut script now does:
+    # 2b_1_fear, 2b_2_fear, 3b_sad. The order of these lines matters.
+    ('034_emo_rest_tsss_mc_2b_fear', '034_emo_rest_tsss_mc_2b_1_fear'),
+    ('034_emo_rest_tsss_mc_3b_fear', '034_emo_rest_tsss_mc_2b_2_fear'),
     ('034_emo_rest_tsss_mc_4b_sad',  '034_emo_rest_tsss_mc_3b_sad'),
-    ('034_4b_sad',                   '034_3b_sad'),   # its STCs
+    # source space: STCs and label_tc of 034 were made with the old block
+    # numbers -> to trash, SS_emo_full.py recomputes them
+    ('034_2b_fear', None), ('034_3b_fear', None), ('034_4b_sad', None),
+    ('034_ecg_label_tc', None), ('034_eog_label_tc', None),
 ]
 
-block_re = re.compile(r'^(\d+)_.*_(\d)b_([a-z]+\d*)\.fif$')
+block_re = re.compile(r'^(\d+)_.*_(\d)b_(?:\d+_)?([a-z]+\d*)\.fif$')
 split_re = re.compile(r'-\d+\.fif$')
 
 
