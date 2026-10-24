@@ -43,7 +43,8 @@ CUT_DIR     = os.path.join(SEARCH_ROOT, '2_cut')
 TRASH_DIR   = os.path.join(SEARCH_ROOT, '_excluded')   # None-entries are MOVED here
 SKIP_DIRS   = {'1_raw', '_trash_cut_fix', '_excluded'}   # never touched (top level of SEARCH_ROOT)
 
-# ── Fixes, applied IN THIS ORDER: (old stem, new stem or None = move to trash)
+# ── Fixes, applied IN THIS ORDER: (old stem, new stem or None = move to trash
+#    [, folder below SEARCH_ROOT the entry is limited to])
 # The fixes for 046, 054 and 034 were already applied / redone (054 and 034
 # were recut with the new cut script). Do NOT put them back: running
 # ('054_emo_rest_tsss_mc_2b_fear', None) again would trash the CORRECT new file.
@@ -61,10 +62,11 @@ FIXES = [
     ('034_2b_2_fear', None),
     ('034_2b_1_fear', '034_2b_fear'),
     ('034_4b_sad',    '034_3b_sad'),
-    # subject-level files that contain fear #2: label_tc npz, SS dynamics
-    # ({subj}_ecg_static.csv, ...), SS error log -> moved, then recomputed
-    ('034_ecg', None),
-    ('034_eog', None),
+    # source-space dynamics ({subj}_ecg_static.csv, ...) contain fear #2 ->
+    # moved, then recomputed. ONLY in SourceSpace/dynamics: the label_tc npz
+    # was cut in place (fear #2 removed, sad 4b -> 3b) and stays.
+    ('034_ecg', None, 'SourceSpace/dynamics'),
+    ('034_eog', None, 'SourceSpace/dynamics'),
 ]
 
 block_re = re.compile(r'^(\d+)_.*_(\d)b_(?:\d+_)?([a-z]+\d*)\.fif$')
@@ -91,10 +93,12 @@ def plan(paths):
     """Simulate all FIXES in order on the set of paths. Returns the list of
     operations (op, src, dst) and a list of problems (conflicts)."""
     ops, problems = [], []
-    for old, new in FIXES:
+    for old, new, *only in FIXES:
         rx = stem_re(old)
+        limit = os.path.join(SEARCH_ROOT, only[0]) + os.sep if only else SEARCH_ROOT
         # deepest first, so files inside a renamed folder are handled before it
-        hits = sorted((p for p in paths if rx.search(os.path.basename(p))),
+        hits = sorted((p for p in paths if rx.search(os.path.basename(p))
+                       and p.startswith(limit)),
                       key=lambda p: -p.count(os.sep))
         if not hits:
             print(f"  (no match for {old})")
