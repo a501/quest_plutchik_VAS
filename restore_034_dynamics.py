@@ -38,16 +38,15 @@ SUBJ         = '034'
 
 # Block labels that belong to fear #2 — all naming variants that may appear
 # in the CSV's block column.  Matched as exact string or as substring.
-FEAR2_PATTERNS = [
-    '3b_fear',    # old cut name (fear #2 was the 3rd block)
-    '2b_2_fear',  # new cut name if the new script had already run
-]
+# Blocks to KEEP — dynamics CSV uses bare block numbers: 1b, 2b, 3b, 4b
+# For 034: 1b=base, 2b=fear#1, 3b=fear#2 (EXCLUDE), 4b=sad (keep but will be renumbered)
+# We keep 1b (base), 2b (fear#1), 4b (sad); drop 3b (fear#2).
+KEEP_BLOCKS = {'1b', '2b', '4b'}
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-def is_fear2(value: str) -> bool:
-    v = str(value)
-    return any(p in v for p in FEAR2_PATTERNS)
+def is_fear2(value) -> bool:
+    return str(value).strip() not in KEEP_BLOCKS
 
 
 def find_block_col(df: pd.DataFrame):
@@ -118,15 +117,12 @@ if os.path.isdir(series_src):
         src_dir = os.path.join(series_src, win_dir)
         dst_dir = os.path.join(DYN_DIR, 'series', win_dir)
         files   = sorted(os.listdir(src_dir))
-        keep    = [f for f in files if not is_fear2(f)]
-        drop    = [f for f in files if     is_fear2(f)]
+        # Series files are per-metric (not per-block), copy all back
         print(f'\n  SERIES {win_dir}/')
-        print(f'         keep {len(keep)}, drop {len(drop)} (fear #2)')
-        if drop:
-            print(f'         dropped: {drop[:5]}{"…" if len(drop) > 5 else ""}')
+        print(f'         copy all {len(files)} files (per-metric, not per-block)')
         if apply:
             os.makedirs(dst_dir, exist_ok=True)
-            for f in keep:
+            for f in files:
                 shutil.copy2(os.path.join(src_dir, f),
                              os.path.join(dst_dir, f))
             print(f'         -> copied to {os.path.relpath(dst_dir, MEG)}')
