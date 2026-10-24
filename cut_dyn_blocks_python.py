@@ -38,7 +38,8 @@ each followed by a complete 18-22 min rest, e.g. 034 where fear was shown
 again after a crash): ALL valid blocks are cut. They share the block number
 of the condition's first occurrence and get an occurrence index:
   034_..._2b_1_fear.fif, 034_..._2b_2_fear.fif, 034_..._3b_sad.fif
-Which one to use is decided later; the log lists them.
+Which one to use is decided later; the log lists them. Once decided, the
+unused occurrence goes into EXCLUDE_BLOCKS and is never cut again.
 
 Log file: everything printed is also written to
   {OUTPUT_DIR}/logs/cut_dyn_blocks_YYYYmmdd_HHMMSS.log
@@ -94,6 +95,13 @@ REST_DUR_MAX_S = 22 * 60   # above this = something wrong
 PARTIAL_REST_MIN_S = 10 * 60   # a video rest cut off by the END OF THE FILE
                                # (no rest_offset, recording stopped) is kept
                                # as a partial block if at least this long
+
+# ── Valid blocks excluded after checking the data: {subj: {condition: [occurrence, ...]}}
+#   034: fear shown twice (MEG complete for both); fear #1 = first exposure
+#        and complete -> fear #2 (occurrence 2) excluded
+EXCLUDE_BLOCKS = {
+    '034': {'fear': [2]},
+}
 
 # ── Padding ────────────────────────────────────────────────────────────────────
 PAD_BEFORE_BLOCK1_S = 2.0   # seconds before rest_onset, block 1 only
@@ -438,6 +446,12 @@ def process_file(fif_path, subj_id, raw, base_count, video_count, pending=None,
             out_path = os.path.join(OUTPUT_DIR, f"{stem}{suffix}.fif")
             base_count += 1
         else:
+            raw_occ = cond_seen.get(('all', condition), 0) + 1
+            cond_seen[('all', condition)] = raw_occ
+            if raw_occ in EXCLUDE_BLOCKS.get(subj_id, {}).get(condition, []):
+                print(f"  ✗ {condition} block {tmin_s:.1f}s (occurrence {raw_occ}) → "
+                      f"EXCLUDED (EXCLUDE_BLOCKS)")
+                continue
             if condition not in cond_seen:          # first occurrence: new block number
                 cond_seen[condition] = (2 + video_count, 0)
                 video_count += 1
@@ -536,7 +550,7 @@ for subj_id in subj_ids:
 
     # Step 4: process each raw file; block numbering continues across files
     # dry pass over the triggers: which conditions have several valid blocks?
-    counts, pend = {}, None
+    counts, pend, occ_all = {}, None, {}
     for _, raw, _ in opened:
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -545,7 +559,10 @@ for subj_id in subj_ids:
             continue
         for b in blks:
             if b['type'] == 'video':
-                counts[b['condition']] = counts.get(b['condition'], 0) + 1
+                c = b['condition']
+                occ_all[c] = occ_all.get(c, 0) + 1
+                if occ_all[c] not in EXCLUDE_BLOCKS.get(subj_id, {}).get(c, []):
+                    counts[c] = counts.get(c, 0) + 1
     repeated = {c for c, n in counts.items() if n > 1}
     for c in sorted(repeated):
         print(f"  ! {c} has {counts[c]} valid blocks (each with a complete rest) "

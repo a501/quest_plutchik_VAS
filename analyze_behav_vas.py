@@ -142,6 +142,14 @@ MIN_LAST_PROBE_S = 15 * 60   # a complete 20-min rest run has its last
 REST_DUR_MIN_S = 18 * 60     # trigger rest window (rest_onset -> offset)
 REST_DUR_MAX_S = 22 * 60     # valid range, as in cut_dyn_blocks_python.py
 
+# ---- training button press at the start of the session ---------------
+# The first probe is dropped ONLY if both ratings are 50, both timed out and
+# the remaining block-1 ratings are on average >= TRAINING_MIN_DROP lower
+# (see training_pair_rows). Same rule in analyze_behav_vas.py and
+# 1_build_vas_dataset.py.
+TRAINING_VALUE = 50
+TRAINING_MIN_DROP = 10
+
 # ---- trigger codes --------------------------------------------------
 REST_ONSET_CODE = 1
 REST_OFFSET_CODE = 2
@@ -614,6 +622,31 @@ def define_blocks(df, subject_id, qc, log):
     return blocks
 
 
+def training_pair_rows(df):
+    """Index of the 2 rows of the session's FIRST probe if it is the training
+    button press, else []. Training press = both ratings are TRAINING_VALUE
+    (the start value), both timed out, and the other block-1 ratings are on
+    average at least TRAINING_MIN_DROP lower. Only then is it dropped - every
+    other timeout is a rating and is used. The probe keeps its index, so the
+    neural snippet of that probe has no rating and is skipped as well."""
+    ctx = df["context"].astype(str).str.strip().str.lower()
+    el = pd.to_numeric(df["elapsed_s"], errors="coerce")
+    r = pd.to_numeric(df["rating"], errors="coerce")
+    st = (df["status"].astype(str).str.strip().str.lower()
+          if "status" in df.columns else pd.Series("", index=df.index))
+    post = ctx.eq("post_video").to_numpy()
+    end = int(post.argmax()) if post.any() else len(df)       # block 1 = before 1st video
+    b1 = df.index[:end][ctx.iloc[:end].eq("within_rest").to_numpy()]
+    if not len(b1):
+        return []
+    pair = b1[el[b1] == el[b1[0]]]
+    others = b1.difference(pair)
+    if (len(pair) == 2 and (r[pair] == TRAINING_VALUE).all() and st[pair].eq("timeout").all()
+            and len(others) and r[others].mean() <= TRAINING_VALUE - TRAINING_MIN_DROP):
+        return list(pair)
+    return []
+
+
 def load_results(subject_id):
     """dyn{subject}_results.csv, followed by its SESSION_PARTS files."""
     parts = [subject_id] + SESSION_PARTS.get(subject_id, [])
@@ -666,6 +699,11 @@ def process_subject(subject_id):
     qc = dict(subject=subject_id, status="")
     try:
         df = load_results(subject_id)
+        tr = training_pair_rows(df)
+        qc["training_press_dropped"] = bool(tr)
+        if tr:
+            log.append("  first probe = training press (50/50, timeout) -> dropped")
+            df = df.drop(index=tr).reset_index(drop=True)
         if "subject_nr" in df.columns and int(df["subject_nr"].iloc[0]) != int(subject_id):
             log.append(f"  ! subject_nr in file = {int(df['subject_nr'].iloc[0])} "
                        f"(filename is used)")

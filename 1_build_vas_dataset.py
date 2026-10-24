@@ -13,8 +13,10 @@ INPUTS (per subject)
 
 STEP 1  Load behavioural file
         - column names lower-cased
-        - the first two rows (timeout trial before block 1) are dropped
-          (DROP_FIRST_PAIR, same convention as the earlier scripts)
+        - the first probe (2 rows) is dropped only if it is the training
+          press: both 50, both timed out, rest of block 1 clearly lower
+          (training_pair_rows). It keeps probe_idx 1, so probe_idx stays
+          aligned with the VAS triggers / neural snippets
         - 'post_video' rows (elapsed_s = NaN) separate the 3 rest blocks:
           rows before the 1st post_video run = block 1, between = block 2,
           after the 2nd run = block 3
@@ -77,7 +79,14 @@ RAW_DIR = ROOT / "raw"
 TRIG_DIR = ROOT / "MEG_trigger_files"
 OUT_DIR = ROOT / "dynamics_models"
 
-DROP_FIRST_PAIR = True
+
+# ---- training button press at the start of the session ---------------
+# The first probe is dropped ONLY if both ratings are 50, both timed out and
+# the remaining block-1 ratings are on average >= TRAINING_MIN_DROP lower
+# (see training_pair_rows). Same rule in analyze_behav_vas.py and
+# 1_build_vas_dataset.py.
+TRAINING_VALUE = 50
+TRAINING_MIN_DROP = 10
 REST_MIN_S, REST_MAX_S = 18 * 60, 22 * 60
 MATCH_TOL_S = 5.0
 VAS_START, VAS_STEP, VAS_MIN, VAS_MAX = 50, 5, 0, 100
@@ -108,6 +117,31 @@ def norm_emotion(x):
     return np.nan
 
 
+def training_pair_rows(df):
+    """Index of the 2 rows of the session's FIRST probe if it is the training
+    button press, else []. Training press = both ratings are TRAINING_VALUE
+    (the start value), both timed out, and the other block-1 ratings are on
+    average at least TRAINING_MIN_DROP lower. Only then is it dropped - every
+    other timeout is a rating and is used. The probe keeps its index, so the
+    neural snippet of that probe has no rating and is skipped as well."""
+    ctx = df["context"].astype(str).str.strip().str.lower()
+    el = pd.to_numeric(df["elapsed_s"], errors="coerce")
+    r = pd.to_numeric(df["rating"], errors="coerce")
+    st = (df["status"].astype(str).str.strip().str.lower()
+          if "status" in df.columns else pd.Series("", index=df.index))
+    post = ctx.eq("post_video").to_numpy()
+    end = int(post.argmax()) if post.any() else len(df)       # block 1 = before 1st video
+    b1 = df.index[:end][ctx.iloc[:end].eq("within_rest").to_numpy()]
+    if not len(b1):
+        return []
+    pair = b1[el[b1] == el[b1[0]]]
+    others = b1.difference(pair)
+    if (len(pair) == 2 and (r[pair] == TRAINING_VALUE).all() and st[pair].eq("timeout").all()
+            and len(others) and r[others].mean() <= TRAINING_VALUE - TRAINING_MIN_DROP):
+        return list(pair)
+    return []
+
+
 def load_behav(subj):
     frames = []
     for i, part in enumerate([subj] + SESSION_PARTS.get(subj, [])):
@@ -117,10 +151,10 @@ def load_behav(subj):
         for col in ("context", "elapsed_s", "emotion", "rating"):
             if col not in d.columns:
                 raise KeyError(f"{path.name}: column '{col}' missing; has {list(d.columns)}")
-        if DROP_FIRST_PAIR and i == 0:     # a part file starts with post_video rows
-            d = d.iloc[2:]
         frames.append(d)
     df = pd.concat(frames, ignore_index=True)
+    df["training"] = False
+    df.loc[training_pair_rows(df), "training"] = True
     df["emotion"] = df["emotion"].map(norm_emotion)
     df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
     df["elapsed_s"] = pd.to_numeric(df["elapsed_s"], errors="coerce")
@@ -331,11 +365,14 @@ def process_subject(subj):
                     fix_interval_s=match["fix_interval_s"] if match else np.nan,
                     trig_matched=match is not None,
                     emotion=r["emotion"], rating=r["rating"], status=r["status"],
-                    timeout=bool(r["timeout"]),
+                    timeout=bool(r["timeout"]), training=bool(r["training"]),
                     valid=bool(r["valid"]), probe_order=r["probe_order"],
                     _screens=match["screens"] if match else None))
             prev = et
     long = pd.DataFrame(rows)
+    # training press: indexed above (probe_idx 1), removed here
+    qc["training_press_dropped"] = bool(long["training"].any()) if len(long) else False
+    long = long[~long["training"]].drop(columns="training") if len(long) else long
 
     # ---- assign screens to emotions ----
     best = None

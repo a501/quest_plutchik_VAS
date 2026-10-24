@@ -40,25 +40,31 @@ from collections import defaultdict
 # ── Paths ──────────────────────────────────────────────────────────────────────
 SEARCH_ROOT = '/home/ZhangJianfeng_04/emo_study/MEG'
 CUT_DIR     = os.path.join(SEARCH_ROOT, '2_cut')
-TRASH_DIR   = os.path.join(SEARCH_ROOT, '_trash_cut_fix')
-SKIP_DIRS   = {'1_raw', '_trash_cut_fix'}   # never touched (top level of SEARCH_ROOT)
+TRASH_DIR   = os.path.join(SEARCH_ROOT, '_excluded')   # None-entries are MOVED here
+SKIP_DIRS   = {'1_raw', '_trash_cut_fix', '_excluded'}   # never touched (top level of SEARCH_ROOT)
 
 # ── Fixes, applied IN THIS ORDER: (old stem, new stem or None = move to trash)
 # The fixes for 046, 054 and 034 were already applied / redone (054 and 034
 # were recut with the new cut script). Do NOT put them back: running
 # ('054_emo_rest_tsss_mc_2b_fear', None) again would trash the CORRECT new file.
 FIXES = [
-    # 034: cut as 2b_fear (fear #1), 3b_fear (fear #2, repeated after the
-    # crash in sad #1), 4b_sad (sad #2). Both fear blocks have a complete
-    # rest, so both are kept and numbered as the cut script now does:
-    # 2b_1_fear, 2b_2_fear, 3b_sad. The order of these lines matters.
-    ('034_emo_rest_tsss_mc_2b_fear', '034_emo_rest_tsss_mc_2b_1_fear'),
-    ('034_emo_rest_tsss_mc_3b_fear', '034_emo_rest_tsss_mc_2b_2_fear'),
-    ('034_emo_rest_tsss_mc_4b_sad',  '034_emo_rest_tsss_mc_3b_sad'),
-    # source space: STCs and label_tc of 034 were made with the old block
-    # numbers -> to trash, SS_emo_full.py recomputes them
-    ('034_2b_fear', None), ('034_3b_fear', None), ('034_4b_sad', None),
-    ('034_ecg_label_tc', None), ('034_eog_label_tc', None),
+    # 034: fear shown twice, MEG complete for both -> fear #1 is used, fear #2
+    # and everything made from it is MOVED to MEG/_excluded/. Works whether
+    # the files still have the old names (2b_fear, 3b_fear, 4b_sad) or were
+    # already renamed (2b_1_fear, 2b_2_fear, 3b_sad). Order matters.
+    ('034_emo_rest_tsss_mc_3b_fear',   None),                            # fear #2, old name
+    ('034_emo_rest_tsss_mc_2b_2_fear', None),                            # fear #2, new name
+    ('034_emo_rest_tsss_mc_2b_1_fear', '034_emo_rest_tsss_mc_2b_fear'),  # fear #1
+    ('034_emo_rest_tsss_mc_4b_sad',    '034_emo_rest_tsss_mc_3b_sad'),   # sad #2
+    # source space: STCs ({subj}_{block}_{cond}_{ver}_eloreta-?h.stc)
+    ('034_3b_fear',   None),
+    ('034_2b_2_fear', None),
+    ('034_2b_1_fear', '034_2b_fear'),
+    ('034_4b_sad',    '034_3b_sad'),
+    # subject-level files that contain fear #2: label_tc npz, SS dynamics
+    # ({subj}_ecg_static.csv, ...), SS error log -> moved, then recomputed
+    ('034_ecg', None),
+    ('034_eog', None),
 ]
 
 block_re = re.compile(r'^(\d+)_.*_(\d)b_(?:\d+_)?([a-z]+\d*)\.fif$')
