@@ -62,11 +62,8 @@ FIXES = [
     ('034_2b_2_fear', None),
     ('034_2b_1_fear', '034_2b_fear'),
     ('034_4b_sad',    '034_3b_sad'),
-    # source-space dynamics ({subj}_ecg_static.csv, ...) contain fear #2 ->
-    # moved, then recomputed. ONLY in SourceSpace/dynamics: the label_tc npz
-    # was cut in place (fear #2 removed, sad 4b -> 3b) and stays.
-    ('034_ecg', None, 'SourceSpace/dynamics'),
-    ('034_eog', None, 'SourceSpace/dynamics'),
+    # SourceSpace/dynamics files are kept as-is: fear #2 rows in the dynamics
+    # CSVs are orphaned (no matching neural data) and harmless.
 ]
 
 block_re = re.compile(r'^(\d+)_.*_(\d)b_(?:\d+_)?([a-z]+\d*)\.fif$')
