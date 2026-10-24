@@ -5,9 +5,9 @@ Behavioural VAS rest-period timeseries analysis (emo_study).
 For each subject file (dynNNN_results.csv) this script:
   * splits the file into its rest blocks (base, then two emotion blocks),
     using the block definition below,
-  * keeps ONLY within_rest rows (drops post_video) and only CONFIRMED
-    ratings (a timeout leaves the cursor wherever it was, so its value is
-    not a rating),
+  * keeps ONLY within_rest rows (drops post_video) and ALL ratings,
+    confirmed AND timeouts (project rule: timeouts are always used; the
+    'timeout' column marks them),
   * labels the two emotion blocks 'sad' / 'fear' from the video triggers
     of the MEG trigger file (7 = sad, 8 = fear); odd/even subject number
     is only the fallback,
@@ -63,8 +63,8 @@ Design decisions for the measures (unchanged):
 Outputs (OUT_DIR = Behav/analysis):
   dyn{NNN}_vas_analysis.csv                    measures, long format
   behav_per_block/dyn{NNN}_block{k}_{role}_behav.csv
-        all within_rest rows of the kept block; 'rating' = confirmed
-        rating (empty for timeouts), 'rating_raw' = value as logged
+        all within_rest rows of the kept block; 'rating' = value as logged
+        (timeouts included), 'timeout' = True for timeout rows
   behav_vas_qc.csv                             one row per subject
 
 A subject is SKIPPED if its dyn{NNN}_vas_analysis.csv is newer than its
@@ -597,7 +597,7 @@ def define_blocks(df, subject_id, qc, log):
         keep = max(cand, key=lambda r: (r["n_valid"], r["run"]))
         if len(cand) > 1:
             flags.append(f"{len(cand)} complete runs at block {num}, "
-                         f"kept run{keep['run'] + 1} ({keep['n_valid']} confirmed ratings)")
+                         f"kept run{keep['run'] + 1} ({keep['n_valid']} ratings)")
         b = df[df["_run"] == keep["run"]].drop(columns=["_run", "_pos"]).copy()
         b.insert(0, "block_num", num)
         b.insert(1, "block_role", role)
@@ -625,14 +625,12 @@ def load_results(subject_id):
             raise KeyError(f"column '{col}' missing; has {list(df.columns)}")
     df["emotion"] = df["emotion"].astype(str).str.strip().str.capitalize()
     df["rating_raw"] = pd.to_numeric(df["rating"], errors="coerce")
-    if "status" in df.columns:
-        status = df["status"].astype(str).str.strip().str.lower()
-        df["valid"] = (status == "confirmed") & df["rating_raw"].notna()
-    else:
-        df["valid"] = df["rating_raw"].notna()
-    # 'rating' = the confirmed rating; a timeout keeps the cursor wherever
-    # it was, so its value is not a rating (kept in rating_raw)
-    df["rating"] = df["rating_raw"].where(df["valid"])
+    status = (df["status"].astype(str).str.strip().str.lower()
+              if "status" in df.columns else pd.Series("confirmed", index=df.index))
+    df["timeout"] = status.eq("timeout")
+    # project rule: timeouts are ALWAYS used - every logged rating is valid
+    df["valid"] = df["rating_raw"].notna()
+    df["rating"] = df["rating_raw"]
     return df
 
 
@@ -685,7 +683,9 @@ def process_subject(subject_id):
                 t, vals = t[good], vals[good]
                 n_all = int((bdf["emotion"] == emo).sum())
                 qc[f"n_{role}_{emo}"] = len(vals)
-                qc[f"n_timeout_{role}_{emo}"] = n_all - len(vals)
+                qc[f"n_timeout_{role}_{emo}"] = int(((bdf["emotion"] == emo)
+                                                     & bdf["timeout"]).sum())
+                qc[f"n_missing_{role}_{emo}"] = n_all - len(vals)
                 if len(vals) == 0:
                     continue
                 meta = {"subject": subject_id,
@@ -700,7 +700,7 @@ def process_subject(subject_id):
         counts = "  ".join(f"{b['block_role'].iloc[0]} {int(b['valid'].sum())}/{len(b)}"
                            for _, b in sorted(blocks.items()))
         log.append(f"  blocks {qc['blocks_found'] or '-'}  (order: {qc['cond_source']})")
-        log.append(f"  confirmed/all ratings: {counts}")
+        log.append(f"  ratings used (incl. timeouts)/rows: {counts}")
         qc["status"] = "ok"
     except Exception as e:
         log.append("  X FAILED: " + "".join(traceback.format_exception_only(type(e), e)).strip())

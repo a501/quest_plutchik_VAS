@@ -7,7 +7,8 @@ All behavioural VAS dynamics analyses that do not need mixed models.
 
 Input:  OUT_DIR/vas_probes_long.csv, OUT_DIR/vas_postvideo.csv  (from 1_)
 A "series" = one subject x condition (baseline/sad/fear) x emotion
-(Sadness/Fear), valid (confirmed) ratings only, time in MINUTES from rest onset.
+(Sadness/Fear), all ratings incl. timeouts ('valid' from 1_ = rating present;
+timeouts are always used), time in MINUTES from rest onset.
 
 A  INDUCTION CHECK  (are the two videos equally specific?)
    Post-video ratings (raw, single ratings) + first in-block rating.
@@ -623,7 +624,7 @@ def section_I(d, out):
         vals = {k: {} for k in ("mean", "sd", "exp_tau_min", "resid_sd", "excess_press")}
         for s, x in g.groupby("subj"):
             for half, xx in (("odd", x[x["probe_idx"] % 2 == 1]), ("even", x[x["probe_idx"] % 2 == 0])):
-                xx = xx[xx["valid"]]   # odd/even split on all probe_idx, fit only confirmed
+                xx = xx[xx["valid"]]   # odd/even split on all probe_idx, fit on all ratings (timeouts included)
                 y, t = xx["rating"].values.astype(float), xx["t_min"].values
                 if len(y) < MIN_VALID // 2 or np.ptp(y) == 0:
                     continue

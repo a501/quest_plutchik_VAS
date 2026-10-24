@@ -156,7 +156,7 @@ def probe_table(behav_dir):
     d = pd.read_csv(behav_dir / "vas_probes_long.csv", dtype={"subj": str})
     d = d[d["subj"].astype(int) < 200]
     # Keep ALL probes (including timeouts) so probe_idx aligns with snippet_idx.
-    # Timeout ratings are NaN already; confirmed-only flag is preserved in "valid".
+    # Timeouts are used like any rating ('valid' = rating present, from 1_).
     d = d.sort_values(["subj", "block", "emotion", "probe_idx"])
     # NaN-out ratings for non-valid probes so they don't contribute to delta,
     # but keep the row so the index sequence stays intact.

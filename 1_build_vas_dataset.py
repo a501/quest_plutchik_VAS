@@ -20,7 +20,8 @@ STEP 1  Load behavioural file
           after the 2nd run = block 3
         - elapsed_s is already block-relative (GetSecs() - block_t): not reset
         - a probe = the 2 rows (Sadness, Fear) sharing one elapsed_s
-        - valid = status == 'confirmed' and rating not NaN
+        - valid = rating not NaN: timeouts are ALWAYS used (project rule);
+          the 'timeout' column marks them
 
 STEP 2  Condition labels
         - preferred: order of the video triggers (7 = sad, 8 = fear) in the
@@ -129,7 +130,9 @@ def load_behav(subj):
         df["status"] = "confirmed"
     if "probe_order" not in df.columns:
         df["probe_order"] = ""
-    df["valid"] = (df["status"] == "confirmed") & df["rating"].notna()
+    df["timeout"] = df["status"].eq("timeout")
+    # project rule: timeouts are ALWAYS used - every logged rating is valid
+    df["valid"] = df["rating"].notna()
 
     # segment: runs of post_video rows split the rest blocks
     is_post = df["context"].astype(str).str.strip().str.lower().eq("post_video")
@@ -328,6 +331,7 @@ def process_subject(subj):
                     fix_interval_s=match["fix_interval_s"] if match else np.nan,
                     trig_matched=match is not None,
                     emotion=r["emotion"], rating=r["rating"], status=r["status"],
+                    timeout=bool(r["timeout"]),
                     valid=bool(r["valid"]), probe_order=r["probe_order"],
                     _screens=match["screens"] if match else None))
             prev = et
@@ -384,7 +388,7 @@ def process_subject(subj):
     long = long.drop(columns="_screens")
     for c, v in feats.items():
         long[c] = v
-    # screens of non-confirmed ratings are not interpretable as rating behaviour
+    # rows without a rating value have no rating behaviour (timeouts are kept)
     long.loc[~long["valid"], ["n_press", "n_reversals", "excess_press", "overshoot"]] = np.nan
 
     qc.update(n_probes=int(long[["block", "probe_idx"]].drop_duplicates().shape[0]),

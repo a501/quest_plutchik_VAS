@@ -8,3 +8,7 @@
   over plain `_tsss`), search the subject folder in `MEG/1_raw/{subject}/` at
   any depth, and name outputs starting with the subject ID.
 - Pipeline scripts skip outputs that already exist.
+- VAS ratings: timeouts are ALWAYS used, in every analysis. A rating with
+  status 'timeout' counts exactly like a confirmed one ('valid' = rating
+  present); a 'timeout' column only marks them. Never filter on
+  status == 'confirmed'.
