@@ -102,9 +102,9 @@ SLIDER_STEP = 5.0          # cursor moves in steps of 5. Verified on the
 CURSOR_START = 50.0        # value of an unmoved cursor (reported only)
 
 # ---- inclusion --------------------------------------------------------
-MIN_PROBES = 18            # same floor as the RT pipeline; applied to the
-                           # full series so every variant uses the same
-                           # subjects
+MIN_PROBES = 15            # series with >= 15 probes are analysed; applied
+                           # to the full series so every variant uses the
+                           # same subjects
 
 # ---- PART A: non-null -------------------------------------------------
 # Lapse rate = share of non-zero ratings that a person with no emotion
