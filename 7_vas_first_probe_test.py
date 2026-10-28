@@ -43,12 +43,16 @@ that starts a rest period, also at baseline, where no video precedes it)
     G  block position: induced scale when its video block was 2nd vs 3rd
        (between participants, Welch t). Tests whether the effect depends
        on order; baseline (always 1st) cannot be separated from order.
+    H  probe profile: probes 1..PROFILE_K each vs the late mean of the
+       block; shows how many early probes are raised (e.g. at baseline),
+       i.e. how many to drop if early baseline ratings are treated as
+       familiarisation rather than emotion.
 
 Note: analyze_behav_vas.py already removes a first probe that is the
 training press (50/50, timed out), so "first" is the first real rating.
 
 Outputs (OUT_DIR): first_probe_per_series.csv, first_probe_tests.csv,
-first_probe_controls.csv
+first_probe_controls.csv, first_probe_profile.csv
 
 Usage
     python3 7_vas_first_probe_test.py
@@ -70,6 +74,8 @@ BASE = Path("/home/ZhangJianfeng_04/emo_study/Behav")
 VAS_PERBLOCK = BASE / "analysis/behav_per_block"
 OUT_DIR = BASE / "analysis/vas_first_probe"
 MIN_PROBES = 15            # same as 5_vas_fluctuation_proof.py
+PROFILE_K = 5              # probe profile: probes 1..PROFILE_K, each compared
+PROFILE_LATE_FROM = 7      # with the mean of probes PROFILE_LATE_FROM..end
 
 COND_ORDER = ["base", "sad", "fear"]
 RATING_ORDER = ["Sadness", "Fear"]
@@ -106,7 +112,9 @@ def per_series(perblock_dir, subj_max):
                              n=y.size, first=y[0], first_time_s=t[0],
                              rest_mean=y[1:].mean(), last=y[-1],
                              slope_per_min=slope_per_min(t, y),
-                             slope_wo_first=slope_per_min(t[1:], y[1:])))
+                             slope_wo_first=slope_per_min(t[1:], y[1:]),
+                             late_mean=y[PROFILE_LATE_FROM - 1:].mean(),
+                             **{f"probe{k}": y[k - 1] for k in range(1, PROFILE_K + 1)}))
     return pd.DataFrame(rows)
 
 
@@ -206,6 +214,26 @@ def run_controls(s):
     return pd.DataFrame(rows)
 
 
+def run_profile(s):
+    """H: how many early probes are raised? Probe k vs the late mean
+    (probes PROFILE_LATE_FROM..end), paired, per cell, Holm over the 6 cells
+    within each k. Decides how many baseline probes a start effect spans."""
+    rows = []
+    for k in range(1, PROFILE_K + 1):
+        for b in COND_ORDER:
+            for e in RATING_ORDER:
+                g = s[(s.block_role == b) & (s.emotion == e)]
+                if len(g) >= 3:
+                    rows.append(dict(test=f"H probe {k} vs late mean", probe=k,
+                                     block_role=b, emotion=e,
+                                     **paired(g[f"probe{k}"].to_numpy(),
+                                              g["late_mean"].to_numpy())))
+    r = pd.DataFrame(rows)
+    for k, idx in r.groupby("probe").groups.items():
+        r.loc[idx, "p_t_holm"] = holm(r.loc[idx, "p_t"])
+    return r
+
+
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     s = per_series(VAS_PERBLOCK, SUBJ_MAX)
@@ -228,8 +256,16 @@ def main():
         print("\nCONTROLS (p uncorrected; p_wilcoxon = Mann-Whitney for G)")
         print(c[["test", "contrast", "measure", "n", "mean_a", "mean_b", "mean_diff",
                  "t", "df", "p_t", "p_wilcoxon"]].to_string(index=False))
+    pr = run_profile(s)
+    pr.to_csv(OUT_DIR / "first_probe_profile.csv", index=False)
+    with pd.option_context("display.width", 200, "display.float_format", "{:.2f}".format):
+        print(f"\nPROBE PROFILE: mean rating at probe k minus mean of probes "
+              f"{PROFILE_LATE_FROM}..end (p_Holm in brackets)")
+        tab = pr.assign(cell=pr.block_role + " " + pr.emotion,
+                        txt=[f"{d:+.1f} ({p:.3f})" for d, p in zip(pr.mean_diff, pr.p_t_holm)])
+        print(tab.pivot(index="cell", columns="probe", values="txt").to_string())
     print(f"\n-> {OUT_DIR}/first_probe_per_series.csv, first_probe_tests.csv, "
-          f"first_probe_controls.csv")
+          f"first_probe_controls.csv, first_probe_profile.csv")
 
 
 if __name__ == "__main__":
