@@ -23,7 +23,8 @@ explicitly about order (drop_first, detrended).
 
 STEPS
   0  load + audit       behav_per_block/*.csv, within_rest rows only,
-                        subjects with ID < SUBJ_MAX
+                        subjects with ID < SUBJ_MAX; first BASE_DROP_FIRST
+                        probes of each baseline block removed
   1  descriptives       per series: level, SD, flatness, relative
                         variability index (Mestdagh et al., 2018)
   2  non-null test      exact binomial: share of ratings > 0 against a
@@ -89,8 +90,6 @@ SUBJ_MAX = 200   # analyse subjects with ID < SUBJ_MAX  (e.g. 1000 = everyone)
 BASE = Path("/home/ZhangJianfeng_04/emo_study/Behav")
 VAS_PERBLOCK = BASE / "analysis/behav_per_block"   # within_rest probes (input)
 VAS_ANALYSIS = BASE / "analysis"                   # dyn{NNN}_vas_analysis.csv (cross-check)
-OUT_DIR = BASE / "analysis/vas_fluctuation_proof"
-
 COND_ORDER = ["base", "sad", "fear"]
 RATING_ORDER = ["Sadness", "Fear"]
 
@@ -105,6 +104,17 @@ CURSOR_START = 50.0        # value of an unmoved cursor (reported only)
 MIN_PROBES = 15            # series with >= 15 probes are analysed; applied
                            # to the full series so every variant uses the
                            # same subjects
+BASE_DROP_FIRST = 1        # baseline blocks only: drop the first N probes.
+                           # The first baseline rating is raised for both
+                           # scales alike (start of the session: scale
+                           # familiarisation or arousal), unlike after the
+                           # videos. 0 = keep all probes. Applied before
+                           # MIN_PROBES and before every variant, so the
+                           # drop_first variant then drops baseline probe N+1.
+
+# results of a run with dropped baseline probes go to their own folder
+OUT_DIR = BASE / ("analysis/vas_fluctuation_proof"
+                  + (f"_basedrop{BASE_DROP_FIRST}" if BASE_DROP_FIRST else ""))
 
 # ---- PART A: non-null -------------------------------------------------
 # Lapse rate = share of non-zero ratings that a person with no emotion
@@ -116,8 +126,10 @@ LAPSE_PRIMARY = 0.10
 # Rating-noise SD on the 0-100 scale. ~10 = "almost a tenth of the scale"
 # (Dejonckheere et al., 2022, Psychological Assessment, within-survey
 # retest). The grid is a sensitivity analysis: conclusions should hold
-# across it, not only at one value.
-NOISE_SD_GRID = (5.0, 7.5, 10.0, 12.5)
+# across it, not only at one value. 2 and 3 cover the estimates from these
+# data (state-space model 6_vas_noise_statespace.py: 1.7 [1.4, 1.9];
+# Sadness - Fear bound: median 5.7).
+NOISE_SD_GRID = (2.0, 3.0, 5.0, 7.5, 10.0, 12.5)
 NOISE_SD_PRIMARY = 10.0
 
 # Smallest resolvable change = one slider step. Used for the verdict:
@@ -495,6 +507,12 @@ def load_probes(perblock_dir, subj_max):
     # probe index is assigned BEFORE dropping missing ratings, so Sadness
     # and Fear stay aligned when one of them timed out
     p["probe_idx"] = p.groupby(["subject", "block_role", "emotion"]).cumcount()
+    if BASE_DROP_FIRST:
+        early = (p["block_role"] == "base") & (p["probe_idx"] < BASE_DROP_FIRST)
+        print(f"  baseline: first {BASE_DROP_FIRST} probe(s) dropped "
+              f"({int(early.sum())} rows, BASE_DROP_FIRST)")
+        p = p[~early].copy()
+        p["probe_idx"] = p.groupby(["subject", "block_role", "emotion"]).cumcount()
     p["t"] = np.where(p["time_source"] == "elapsed_s",
                       p["elapsed_s"], p["probe_idx"].astype(float))
     p = p.drop(columns="_sortkey")
@@ -591,6 +609,8 @@ def crosscheck_battery(series, analysis_dir):
             v = pd.to_numeric(r["value"], errors="coerce")
             if key not in series or not np.isfinite(v):
                 continue
+            if BASE_DROP_FIRST and key[1] == "base":
+                continue        # the battery uses all baseline probes
             y = series[key]["y"]
             if r["measure"] == "mean":
                 rows.append(dict(subject=s, block_role=key[1], emotion=key[2],
@@ -603,6 +623,8 @@ def crosscheck_battery(series, analysis_dir):
                                  abs_diff=min(d0, d1),
                                  ddof_match=0 if d0 <= d1 else 1))
     cc = pd.DataFrame(rows)
+    if BASE_DROP_FIRST:
+        print("  battery cross-check: baseline series skipped (BASE_DROP_FIRST)")
     if cc.empty:
         print("  [skip] battery cross-check: nothing comparable")
         return cc
@@ -1062,6 +1084,7 @@ def config_table(step_size, on_grid, n_sim, n_boot, n_blrt, n_stab):
     rows = [
         ("SUBJ_MAX", SUBJ_MAX, "Subjects with ID below this value are analysed."),
         ("MIN_PROBES", MIN_PROBES, "Minimum valid probes for a series (or Sadness-Fear pairs) to be analysed."),
+        ("BASE_DROP_FIRST", BASE_DROP_FIRST, "First probes dropped in the baseline blocks only (start-of-session effect); 0 = none."),
         ("SLIDER_STEP", SLIDER_STEP, "Rating resolution: the cursor moves in steps of this size."),
         ("ratings_on_grid_pct", round(100 * on_grid, 2), "Share of ratings that lie on the slider grid (data check)."),
         ("simulated_ratings_rounded", step_size is not None, "Whether simulated ratings are rounded to the grid like real ones."),
