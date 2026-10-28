@@ -17,8 +17,9 @@ PART 1 - DISTRIBUTION FIT, per block x emotion cell
         maximum likelihood) to the positive values; AIC; Kolmogorov-Smirnov
         D with a parametric-bootstrap p-value (parameters are estimated, so
         the plain KS p-value would be too lenient)
-    share > 0: count exact 0 and 1; fit Beta to the values strictly inside
-        (0, 1); AIC, KS as above
+    share > 0: count exact 0 and 1; fit Beta (a) to the values strictly
+        inside (0, 1) and (b) to all values after squeezing 0 -> SQUEEZE_LO
+        and 1 -> SQUEEZE_HI; AIC, KS as above
 
 PART 2 - TESTS THAT RESPECT THE DISTRIBUTION
     The same 9 comparisons as the slides (3 block pairs per scale, Sadness
@@ -32,10 +33,12 @@ PART 2 - TESTS THAT RESPECT THE DISTRIBUTION
       one-part model        Tweedie GEE (compound Poisson-Gamma, power 1.5,
                             allows exact zeros), log link -> ratio of means
     share > 0
-      the share is k non-zero probes out of n, so its natural model is
-      binomial: logistic GEE on the probes (k ones, n - k zeros per series)
-      -> odds ratio. A Beta model would have to drop or squeeze the 0 and 1
-      values; the binomial model needs neither.
+      binomial: the share is k non-zero probes out of n, so logistic GEE on
+      the probes (k ones, n - k zeros per series) -> odds ratio
+      Beta regression (logit link, cluster-robust SEs by participant) on the
+      share with 0 -> SQUEEZE_LO and 1 -> SQUEEZE_HI -> odds ratio of the
+      mean share; sensitivity: Smithson & Verkuilen (2006) squeeze
+      (y (N - 1) + 0.5) / N, N = number of series
     For comparison, on the same pairs: paired t-test and Wilcoxon
     signed-rank (participants with both cells). Holm over the 9
     comparisons within each test and measure.
@@ -70,6 +73,7 @@ DESC = BASE / "vas_fluctuation_proof/01_series_descriptives.csv"
 OUT_DIR = BASE / "vas_distribution_check"
 N_BOOT_KS = 500
 TWEEDIE_POWER = 1.5
+SQUEEZE_LO, SQUEEZE_HI = 0.001, 0.999   # Beta: share of 0 and 1 moved inside
 ALPHA = 0.05
 SEED = 20261028
 
@@ -127,19 +131,26 @@ def part1(d, rng):
             x = g[meas].to_numpy(float)
             x = x[np.isfinite(x)]
             if meas == "frac_nonzero":
-                inner = x[(x > 0) & (x < 1)]
-                base = dict(cell=f"{b} {e}", measure="share > 0", n=x.size,
-                            n_zero=int((x == 0).sum()), n_one=int((x == 1).sum()),
-                            n_fitted=inner.size)
-                names = ["beta"]
-                pos = inner
+                cnt = dict(n=x.size, n_zero=int((x == 0).sum()), n_one=int((x == 1).sum()))
+                for label, vals in (("share > 0 (inside 0-1 only)", x[(x > 0) & (x < 1)]),
+                                    ("share > 0 (0/1 squeezed)",
+                                     np.clip(x, SQUEEZE_LO, SQUEEZE_HI))):
+                    if vals.size < 8:
+                        continue
+                    par, ll, aic = fit_dist("beta", vals)
+                    D, p = ks_boot("beta", vals, par, rng)
+                    rows.append(dict(cell=f"{b} {e}", measure=label, **cnt,
+                                     n_fitted=vals.size, distribution="beta", aic=aic,
+                                     ks_D=D, ks_p_boot=p, delta_aic=0.0, best_by_aic=True,
+                                     params=" ".join(f"{v:.3g}" for v in par)))
+                continue
             else:
                 pos = x[x > 0]
                 base = dict(cell=f"{b} {e}", measure=meas, n=x.size,
                             n_zero=int((x == 0).sum()), n_one=np.nan, n_fitted=pos.size)
-                names = ["gamma", "weibull", "lognormal"]
             if pos.size < 8:
                 continue
+            names = ["gamma", "weibull", "lognormal"]
             fits = {}
             for nm in names:
                 par, ll, aic = fit_dist(nm, pos)
@@ -205,6 +216,38 @@ def gee_contrasts(df, y, family, label, measure):
     return rows
 
 
+def beta_contrasts(df, y, label, measure):
+    """Beta regression y ~ 0 + cell (logit link for the mean, constant
+    precision), cluster-robust SEs by participant; Wald tests of the 9
+    pairwise differences -> odds ratio of the mean share."""
+    from statsmodels.othermod.betareg import BetaModel
+    df = df.copy()
+    present = [c for c in CELL_NAME if (df["cell"] == c).any()]
+    df["cell"] = pd.Categorical(df["cell"], categories=present)
+    m = BetaModel.from_formula(f"{y} ~ 0 + C(cell)", df)
+    try:
+        r = m.fit(cov_type="cluster", cov_kwds={"groups": df["subject"].to_numpy()},
+                  disp=0, maxiter=500)
+    except Exception as ex:          # noqa: BLE001 - report and continue
+        print(f"  ! {label} {measure}: Beta regression failed ({type(ex).__name__}: {ex})")
+        return []
+    k = len(present)                 # mean parameters; the last one is precision
+    beta, cov = r.params.values[:k], r.cov_params().values[:k, :k]
+    rows = []
+    for i, j in PAIRS:
+        a, b = CELL_NAME[i], CELL_NAME[j]
+        if a not in present or b not in present:
+            continue
+        c = np.zeros(k)
+        c[present.index(a)], c[present.index(b)] = 1, -1
+        est, se = float(c @ beta), float(np.sqrt(c @ cov @ c))
+        z = est / se if se > 0 else np.nan
+        rows.append(dict(measure=measure, test=label, comparison=f"{a} vs {b}",
+                         estimate=float(np.exp(est)), estimate_name="odds ratio of mean",
+                         stat=z, p=float(2 * stats.norm.sf(abs(z)))))
+    return rows
+
+
 def paired_rows(w, measure):
     rows = []
     for i, j in PAIRS:
@@ -253,6 +296,13 @@ def part2(d):
                                    for kk, nn in zip(k, d["n"].astype(int))])})
     rows += gee_contrasts(probes, "nonzero", sm.families.Binomial(),
                           "binomial (logistic GEE on probes)", "share > 0")
+    n_ser = len(d)
+    sh = d.assign(share_sq=d["frac_nonzero"].clip(SQUEEZE_LO, SQUEEZE_HI),
+                  share_sv=(d["frac_nonzero"] * (n_ser - 1) + 0.5) / n_ser)
+    rows += beta_contrasts(sh, "share_sq",
+                           f"Beta regression (0/1 -> {SQUEEZE_LO}/{SQUEEZE_HI})", "share > 0")
+    rows += beta_contrasts(sh, "share_sv",
+                           "Beta regression (Smithson-Verkuilen squeeze)", "share > 0")
     r = pd.DataFrame(rows)
     for (meas, test), idx in r.groupby(["measure", "test"]).groups.items():
         r.loc[idx, "p_holm"] = holm(r.loc[idx, "p"])
