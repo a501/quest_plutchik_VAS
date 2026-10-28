@@ -19,18 +19,36 @@ elapsed_s, at least MIN_PROBES probes)
                two sides of the comparison do not share data)
     last       rating at the last probe
     slope      least-squares slope over time, rating points per minute
+    slope_wo_first  the same slope without the first probe
+    block_num  position of the block in the session (1 = baseline, always
+               first; 2/3 = the two video blocks, counterbalanced)
 
 TESTS PER BLOCK x EMOTION CELL (across participants)
     A  first vs rest_mean   paired t-test, Wilcoxon signed-rank, d_z
     B  first vs last        paired t-test, Wilcoxon, d_z
     C  slope vs 0           one-sample t-test, Wilcoxon
-    Holm correction across the 6 cells within each test (A, B, C).
-    The baseline cells are the control: no video precedes them.
+    D  slope_wo_first vs 0  as C, without the first probe
+    Holm correction across the 6 cells within each test (A-D).
+
+CONTROLS FOR THE START-OF-REST EFFECT (first rating raised in every block
+that starts a rest period, also at baseline, where no video precedes it)
+    E  within-block control: induced minus non-induced scale in the same
+       video block (Sadness - Fear after sad, Fear - Sadness after fear),
+       for d = first - rest_mean and for both slopes. Both scales share the
+       block, its position and the start of the rest; only the induced
+       emotion differs. Paired t-test, Wilcoxon.
+    F  video vs baseline: induced scale in the video block minus the same
+       scale at baseline (paired). Confounded with block order, because
+       baseline is always the first block.
+    G  block position: induced scale when its video block was 2nd vs 3rd
+       (between participants, Welch t). Tests whether the effect depends
+       on order; baseline (always 1st) cannot be separated from order.
 
 Note: analyze_behav_vas.py already removes a first probe that is the
 training press (50/50, timed out), so "first" is the first real rating.
 
-Outputs (OUT_DIR): first_probe_per_series.csv, first_probe_tests.csv
+Outputs (OUT_DIR): first_probe_per_series.csv, first_probe_tests.csv,
+first_probe_controls.csv
 
 Usage
     python3 7_vas_first_probe_test.py
@@ -81,12 +99,19 @@ def per_series(perblock_dir, subj_max):
             y, t = g["rating"].to_numpy(float), g["elapsed_s"].to_numpy(float)
             if y.size < MIN_PROBES:
                 continue
-            slope = (np.polyfit(t / 60.0, y, 1)[0] if np.ptp(t) > 0 else np.nan)
+            num = (pd.to_numeric(g["block_num"], errors="coerce").dropna()
+                   if "block_num" in g.columns else pd.Series(dtype=float))
             rows.append(dict(subject=int(m.group(1)), block_role=b, emotion=e,
+                             block_num=(int(num.iloc[0]) if num.size else np.nan),
                              n=y.size, first=y[0], first_time_s=t[0],
                              rest_mean=y[1:].mean(), last=y[-1],
-                             slope_per_min=slope))
+                             slope_per_min=slope_per_min(t, y),
+                             slope_wo_first=slope_per_min(t[1:], y[1:])))
     return pd.DataFrame(rows)
+
+
+def slope_per_min(t, y):
+    return np.polyfit(t / 60.0, y, 1)[0] if np.ptp(t) > 0 else np.nan
 
 
 # ===================================================================
@@ -128,19 +153,57 @@ def run_tests(s):
                          **paired(g["first"].to_numpy(), g["rest_mean"].to_numpy())})
             rows.append({**cell, "test": "B first vs last",
                          **paired(g["first"].to_numpy(), g["last"].to_numpy())})
-            sl = g["slope_per_min"].dropna().to_numpy()
-            t = stats.ttest_1samp(sl, 0.0)
-            w = stats.wilcoxon(sl) if np.any(sl != 0) else None
-            rows.append({**cell, "test": "C slope vs 0", "n": int(sl.size),
-                         "mean_a": sl.mean(), "mean_diff": sl.mean(),
-                         "sd_diff": sl.std(ddof=1), "t": t.statistic, "df": sl.size - 1,
-                         "p_t": t.pvalue, "p_wilcoxon": (w.pvalue if w is not None else 1.0),
-                         "d_z": sl.mean() / sl.std(ddof=1) if sl.std(ddof=1) > 0 else np.nan})
+            for test, col in (("C slope vs 0", "slope_per_min"),
+                              ("D slope_wo_first vs 0", "slope_wo_first")):
+                sl = g[col].dropna().to_numpy()
+                rows.append({**cell, "test": test,
+                             **paired(sl, np.zeros(sl.size)), "mean_b": np.nan})
     r = pd.DataFrame(rows)
     for test, idx in r.groupby("test").groups.items():
         r.loc[idx, "p_t_holm"] = holm(r.loc[idx, "p_t"])
         r.loc[idx, "p_wilcoxon_holm"] = holm(r.loc[idx, "p_wilcoxon"])
     return r
+
+
+INDUCED = {"sad": ("Sadness", "Fear"), "fear": ("Fear", "Sadness")}
+MEASURES = ("first_minus_rest", "slope_per_min", "slope_wo_first")
+
+
+def run_controls(s):
+    """Tests E-G: control the start-of-rest effect (see header)."""
+    s = s.assign(first_minus_rest=s["first"] - s["rest_mean"])
+    w = s.pivot_table(index="subject", columns=["block_role", "emotion"],
+                      values=list(MEASURES))
+    rows = []
+    for b, (ind, other) in INDUCED.items():
+        for meas in MEASURES:
+            # E: induced vs non-induced scale, same block
+            x, y = w.get((meas, b, ind)), w.get((meas, b, other))
+            if x is not None and y is not None:
+                m = x.notna() & y.notna()
+                rows.append(dict(test="E induced vs other scale, same block", block_role=b,
+                                 contrast=f"{ind} - {other}", measure=meas,
+                                 **paired(x[m].to_numpy(), y[m].to_numpy())))
+            # F: induced scale, video block vs baseline
+            y = w.get((meas, "base", ind))
+            if x is not None and y is not None:
+                m = x.notna() & y.notna()
+                rows.append(dict(test="F video block vs baseline (order-confounded)",
+                                 block_role=b, contrast=f"{ind}: {b} - base", measure=meas,
+                                 **paired(x[m].to_numpy(), y[m].to_numpy())))
+            # G: block position 2 vs 3 for the induced scale (between participants)
+            g = s[(s.block_role == b) & (s.emotion == ind)]
+            p2 = g.loc[g.block_num == 2, meas].dropna().to_numpy()
+            p3 = g.loc[g.block_num == 3, meas].dropna().to_numpy()
+            if p2.size >= 3 and p3.size >= 3:
+                t = stats.ttest_ind(p2, p3, equal_var=False)
+                u = stats.mannwhitneyu(p2, p3)
+                rows.append(dict(test="G block position 2 vs 3", block_role=b,
+                                 contrast=f"{ind}: 2nd - 3rd", measure=meas,
+                                 n=int(p2.size + p3.size), mean_a=p2.mean(), mean_b=p3.mean(),
+                                 mean_diff=p2.mean() - p3.mean(), t=t.statistic,
+                                 df=t.df, p_t=t.pvalue, p_wilcoxon=u.pvalue))
+    return pd.DataFrame(rows)
 
 
 def main():
@@ -158,7 +221,15 @@ def main():
         for test, g in show.groupby("test", sort=False):
             print(f"\n{test}  (mean_a = first or slope, mean_b = comparison)")
             print(g.drop(columns="test").to_string(index=False))
-    print(f"\n-> {OUT_DIR}/first_probe_per_series.csv, first_probe_tests.csv")
+    c = run_controls(s)
+    c.to_csv(OUT_DIR / "first_probe_controls.csv", index=False)
+    with pd.option_context("display.width", 200, "display.max_columns", 20,
+                           "display.float_format", "{:.3f}".format):
+        print("\nCONTROLS (p uncorrected; p_wilcoxon = Mann-Whitney for G)")
+        print(c[["test", "contrast", "measure", "n", "mean_a", "mean_b", "mean_diff",
+                 "t", "df", "p_t", "p_wilcoxon"]].to_string(index=False))
+    print(f"\n-> {OUT_DIR}/first_probe_per_series.csv, first_probe_tests.csv, "
+          f"first_probe_controls.csv")
 
 
 if __name__ == "__main__":
