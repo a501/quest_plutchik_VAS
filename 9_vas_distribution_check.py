@@ -30,6 +30,9 @@ PART 2 - TESTS THAT RESPECT THE DISTRIBUTION
       hurdle model, part 1  P(value = 0)      logistic GEE  -> odds ratio
       hurdle model, part 2  value | value > 0 Gamma GEE, log link
                                                 -> ratio of means
+      hurdle part 2, alt.   value | value > 0 Weibull regression, log
+                            scale per cell, common shape, cluster-robust
+                            (sandwich) SEs by participant -> ratio of means
       one-part model        Tweedie GEE (compound Poisson-Gamma, power 1.5,
                             allows exact zeros), log link -> ratio of means
     share > 0
@@ -43,15 +46,33 @@ PART 2 - TESTS THAT RESPECT THE DISTRIBUTION
     signed-rank (participants with both cells). Holm over the 9
     comparisons within each test and measure.
 
+PART 3 - SIMULATION (--simulate, optional; slow)
+    Do the tests keep their false-positive rate with these data, and how
+    often do they find a known effect?
+    For each of the 9 comparisons, the two cells of every participant are
+    swapped at random (probability .5), N_SIM times. Then the condition
+    has no effect by construction (H0 true) while everything else - skew,
+    zeros, 0/1 shares, between-person differences, correlation of the two
+    cells - stays as in the real data. Each test is run on each swapped
+    data set; false-positive rate = share of p < .05 (uncorrected; nominal
+    .05). Power: same swapped data, then a known effect is added to the
+    second cell: mean and SD x EFFECT_RATIO (zeros stay 0); share of
+    probes > 0 + EFFECT_SHARE (capped at 1, k = round(share x n)).
+    Pooled over the 9 comparisons: 9 x N_SIM data sets per test; Monte
+    Carlo SE of a rate near .05 with N_SIM = 200: about .005.
+
 Outputs (OUT_DIR): dist_fit.csv, dist_tests.csv (one row per comparison
 and test, with a column saying whether the conclusion at alpha = .05
-differs from the paired t-test)
+differs from the paired t-test); with --simulate also dist_sim.csv (one
+row per measure, test and scenario) and dist_sim_raw.csv (all p-values)
 
 Requires statsmodels (pip install --user statsmodels).
 
 Usage
     python3 9_vas_distribution_check.py
     python3 9_vas_distribution_check.py --desc path/to/01_series_descriptives.csv
+    python3 9_vas_distribution_check.py --simulate            # + PART 3
+    python3 9_vas_distribution_check.py --simulate --n-sim 50  # quick look
 """
 
 import argparse
@@ -76,6 +97,9 @@ TWEEDIE_POWER = 1.5
 SQUEEZE_LO, SQUEEZE_HI = 0.001, 0.999   # Beta: share of 0 and 1 moved inside
 ALPHA = 0.05
 SEED = 20261028
+N_SIM = 200            # PART 3: swapped data sets per comparison
+EFFECT_RATIO = 1.3     # PART 3 power: mean and SD of the second cell x 1.3
+EFFECT_SHARE = 0.10    # PART 3 power: share of probes > 0 + 10 percentage points
 
 CELLS = [("base", "Sadness"), ("base", "Fear"), ("sad", "Sadness"),
          ("sad", "Fear"), ("fear", "Sadness"), ("fear", "Fear")]
@@ -248,6 +272,62 @@ def beta_contrasts(df, y, label, measure):
     return rows
 
 
+def weibull_contrasts(df, y, label, measure):
+    """Weibull regression on y > 0: log scale = one parameter per cell,
+    common shape k; maximum likelihood; cluster-robust (sandwich) covariance
+    by participant. With a common shape the mean is scale x Gamma(1 + 1/k),
+    so exp(difference of log scales) = ratio of means, as in the Gamma GEE."""
+    from scipy.optimize import minimize
+    present = [c for c in CELL_NAME if (df["cell"] == c).any()]
+    X = np.stack([(df["cell"] == c).to_numpy(float) for c in present], axis=1)
+    yv = df[y].to_numpy(float)
+    ly = np.log(yv)
+    q = len(present)
+
+    def parts(th):
+        b, lk = th[:q], th[q]
+        k = np.exp(lk)
+        lz = ly - X @ b                       # log(y / scale)
+        u = np.exp(k * lz)                    # (y / scale)^k
+        ll = lk - ly + k * lz - u             # log f(y)
+        sb = (k * (u - 1))[:, None] * X       # d ll / d log scale
+        sk = 1 + k * lz * (1 - u)             # d ll / d log k
+        return ll, np.column_stack([sb, sk]), k, lz, u
+
+    def nll(th):
+        ll, sc, *_ = parts(th)
+        return -ll.sum(), -sc.sum(0)
+
+    th0 = np.r_[[np.log(yv[X[:, c] > 0].mean()) for c in range(q)], 0.0]
+    res = minimize(nll, th0, jac=True, method="BFGS")
+    if not np.all(np.isfinite(res.x)):
+        print(f"  ! {label} {measure}: Weibull fit failed")
+        return []
+    _, sc, k, lz, u = parts(res.x)
+    H = np.zeros((q + 1, q + 1))              # observed information (- Hessian)
+    for c in range(q):
+        m = X[:, c] > 0
+        H[c, c] = (k ** 2 * u[m]).sum()
+        H[c, q] = H[q, c] = -(k * (u[m] - 1) + k ** 2 * u[m] * lz[m]).sum()
+    H[q, q] = -(k * lz * (1 - u - k * u * lz)).sum()
+    S = pd.DataFrame(sc).groupby(df["subject"].to_numpy()).sum().to_numpy()
+    Hi = np.linalg.inv(H)
+    cov = Hi @ (S.T @ S) @ Hi
+    rows = []
+    for i, j in PAIRS:
+        a, b = CELL_NAME[i], CELL_NAME[j]
+        if a not in present or b not in present:
+            continue
+        c = np.zeros(q + 1)
+        c[present.index(a)], c[present.index(b)] = 1, -1
+        est, se = float(c @ res.x), float(np.sqrt(c @ cov @ c))
+        z = est / se if se > 0 else np.nan
+        rows.append(dict(measure=measure, test=label, comparison=f"{a} vs {b}",
+                         estimate=float(np.exp(est)), estimate_name="ratio of means",
+                         stat=z, p=float(2 * stats.norm.sf(abs(z)))))
+    return rows
+
+
 def paired_rows(w, measure):
     rows = []
     for i, j in PAIRS:
@@ -269,6 +349,17 @@ def paired_rows(w, measure):
     return rows
 
 
+def probe_rows(d):
+    """One row per probe: k ones and n - k zeros per series."""
+    n = d["n"].astype(int).to_numpy()
+    k = np.rint(d["frac_nonzero"] * n).astype(int)
+    return pd.DataFrame({
+        "subject": np.repeat(d["subject"].to_numpy(), n),
+        "cell": np.repeat(d["cell"].to_numpy(), n),
+        "nonzero": np.concatenate([np.r_[np.ones(kk), np.zeros(nn - kk)]
+                                   for kk, nn in zip(k, n)])})
+
+
 def part2(d):
     import statsmodels.api as sm
     d = d.assign(cell=d.block_role + " " + d.emotion)
@@ -282,19 +373,14 @@ def part2(d):
         pos = d[d[meas] > 0]
         rows += gee_contrasts(pos, meas, sm.families.Gamma(sm.families.links.Log()),
                               "hurdle part 2: Gamma | > 0", meas)
+        rows += weibull_contrasts(pos, meas, "hurdle part 2: Weibull | > 0", meas)
         rows += gee_contrasts(d, meas,
                               sm.families.Tweedie(var_power=TWEEDIE_POWER,
                                                   link=sm.families.links.Log()),
                               "Tweedie (zeros included)", meas)
     w = d.pivot_table(index="subject", columns="cell", values="frac_nonzero")
     rows += paired_rows(w, "share > 0")
-    k = np.rint(d["frac_nonzero"] * d["n"]).astype(int)
-    probes = pd.DataFrame({
-        "subject": np.repeat(d["subject"].to_numpy(), d["n"].to_numpy()),
-        "cell": np.repeat(d["cell"].to_numpy(), d["n"].to_numpy()),
-        "nonzero": np.concatenate([np.r_[np.ones(kk), np.zeros(nn - kk)]
-                                   for kk, nn in zip(k, d["n"].astype(int))])})
-    rows += gee_contrasts(probes, "nonzero", sm.families.Binomial(),
+    rows += gee_contrasts(probe_rows(d), "nonzero", sm.families.Binomial(),
                           "binomial (logistic GEE on probes)", "share > 0")
     n_ser = len(d)
     sh = d.assign(share_sq=d["frac_nonzero"].clip(SQUEEZE_LO, SQUEEZE_HI),
@@ -315,6 +401,82 @@ def part2(d):
 
 
 # ===================================================================
+# PART 3 - SIMULATION
+# ===================================================================
+
+SIM_TESTS = {"mean": ["paired t", "Wilcoxon", "hurdle part 2: Gamma | > 0",
+                      "hurdle part 2: Weibull | > 0", "Tweedie (zeros included)"],
+             "share > 0": ["paired t", "Wilcoxon", "binomial (logistic GEE on probes)",
+                           f"Beta regression (0/1 -> {SQUEEZE_LO}/{SQUEEZE_HI})"]}
+SIM_TESTS["sd"] = SIM_TESTS["mean"]
+
+
+def run_two_cells(d2, meas):
+    """All tests of SIM_TESTS[meas] on a data set with two cells; p per test."""
+    import statsmodels.api as sm
+    col = "frac_nonzero" if meas == "share > 0" else meas
+    w = d2.pivot_table(index="subject", columns="cell", values=col)
+    rows = paired_rows(w, meas)
+    if meas == "share > 0":
+        rows += gee_contrasts(probe_rows(d2), "nonzero", sm.families.Binomial(),
+                              "binomial (logistic GEE on probes)", meas)
+        rows += beta_contrasts(d2.assign(share_sq=d2[col].clip(SQUEEZE_LO, SQUEEZE_HI)),
+                               "share_sq",
+                               f"Beta regression (0/1 -> {SQUEEZE_LO}/{SQUEEZE_HI})", meas)
+    else:
+        pos = d2[d2[col] > 0]
+        rows += gee_contrasts(pos, col, sm.families.Gamma(sm.families.links.Log()),
+                              "hurdle part 2: Gamma | > 0", meas)
+        rows += weibull_contrasts(pos, col, "hurdle part 2: Weibull | > 0", meas)
+        rows += gee_contrasts(d2, col, sm.families.Tweedie(var_power=TWEEDIE_POWER,
+                                                           link=sm.families.links.Log()),
+                              "Tweedie (zeros included)", meas)
+    return {r["test"]: r["p"] for r in rows}
+
+
+def add_effect(d2, b, meas):
+    """Known effect in cell b (PART 3 power)."""
+    d2 = d2.copy()
+    m = d2["cell"] == b
+    if meas == "share > 0":
+        n = d2.loc[m, "n"].astype(int)
+        sh = (d2.loc[m, "frac_nonzero"] + EFFECT_SHARE).clip(upper=1)
+        d2.loc[m, "frac_nonzero"] = np.rint(sh * n) / n
+    else:
+        d2.loc[m, meas] = d2.loc[m, meas] * EFFECT_RATIO
+    return d2
+
+
+def part3(d, n_sim, rng):
+    d = d.assign(cell=d.block_role + " " + d.emotion)
+    cols = ["mean", "sd", "frac_nonzero", "n"]
+    raw = []
+    for pi, (i, j) in enumerate(PAIRS):
+        a, b = CELL_NAME[i], CELL_NAME[j]
+        both = set(d.loc[d.cell == a, "subject"]) & set(d.loc[d.cell == b, "subject"])
+        d2 = d[d.cell.isin([a, b]) & d.subject.isin(both)].sort_values(["subject", "cell"])
+        A = d2[d2.cell == a].set_index("subject")[cols]
+        B = d2[d2.cell == b].set_index("subject")[cols].loc[A.index]
+        print(f"  {a} vs {b}: {len(A)} participants, {n_sim} swaps", flush=True)
+        for r in range(n_sim):
+            flip = rng.random(len(A)) < 0.5
+            A2, B2 = A.copy(), B.copy()
+            A2[flip], B2[flip] = B.values[flip], A.values[flip]
+            sw = pd.concat([A2.assign(cell=a), B2.assign(cell=b)]).reset_index()
+            for meas in ("mean", "sd", "share > 0"):
+                for scen, data in (("H0 (no effect)", sw), ("effect added", add_effect(sw, b, meas))):
+                    for test, p in run_two_cells(data, meas).items():
+                        raw.append(dict(comparison=f"{a} vs {b}", rep=r, measure=meas,
+                                        scenario=scen, test=test, p=p))
+    raw = pd.DataFrame(raw)
+    summ = (raw.assign(sig=raw.p < ALPHA)
+            .groupby(["measure", "test", "scenario"]).sig.agg(["mean", "size"])
+            .rename(columns={"mean": "rate_p_lt_05", "size": "n_datasets"}).reset_index())
+    summ["mc_se"] = np.sqrt(summ.rate_p_lt_05 * (1 - summ.rate_p_lt_05) / summ.n_datasets)
+    return summ, raw
+
+
+# ===================================================================
 # MAIN
 # ===================================================================
 
@@ -322,6 +484,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--desc", default=str(DESC))
     ap.add_argument("--out-dir", default=str(OUT_DIR))
+    ap.add_argument("--simulate", action="store_true", help="run PART 3 (slow)")
+    ap.add_argument("--n-sim", type=int, default=N_SIM)
     a = ap.parse_args()
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -355,6 +519,16 @@ def main():
         print("\nconclusions that differ from the paired t-test:")
         print(n_diff.to_string() if len(n_diff) else "  none")
     print(f"\n-> {out}/dist_fit.csv, dist_tests.csv")
+    if a.simulate:
+        print(f"\nPART 3 - simulation: {a.n_sim} random swaps per comparison")
+        summ, raw = part3(d, a.n_sim, rng)
+        summ.to_csv(out / "dist_sim.csv", index=False)
+        raw.to_csv(out / "dist_sim_raw.csv", index=False)
+        with pd.option_context("display.width", 200, "display.float_format", "{:.3f}".format):
+            print(summ.pivot_table(index=["measure", "test"], columns="scenario",
+                                   values="rate_p_lt_05").to_string())
+            print("false-positive rate should be close to .05 (MC SE about .005)")
+        print(f"-> {out}/dist_sim.csv, dist_sim_raw.csv")
 
 
 if __name__ == "__main__":
