@@ -97,8 +97,8 @@ C_VSAD, C_VFEAR, C_LEFT, C_RIGHT, C_CONF, C_PROBE_OFF = 7, 8, 11, 12, 13, 14
 # Sessions saved in several result files (task restarted under another ID):
 # the part files are read directly after the subject's own file, and the
 # part IDs are never treated as subjects. Same lists in analyze_behav_vas.py.
-SESSION_PARTS = {"034": ["134"], "036": ["136"]}
-PART_IDS = {p for parts in SESSION_PARTS.values() for p in parts}
+SESSION_PARTS = {}   # part CSVs are now physically merged into the main subject file
+PART_IDS = set()
 # condition of every post_video run of the merged session; the first block
 # of each condition is kept, later repeats are dropped
 VIDEO_SEQUENCE_OVERRIDE = {"034": ["fear", "fear", "sad"],

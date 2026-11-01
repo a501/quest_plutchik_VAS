@@ -122,8 +122,8 @@ SUBJ_MAX = 200         # analyse subjects with ID < SUBJ_MAX (repeat visits 2xx/
 # The task was restarted under another ID; the later file is read directly
 # after the subject's own file, as one session. The part IDs are never
 # analysed as subjects of their own.
-SESSION_PARTS = {"034": ["134"], "036": ["136"]}
-PART_IDS = {p for parts in SESSION_PARTS.values() for p in parts}
+SESSION_PARTS = {}   # part CSVs are now physically merged into the main subject file
+PART_IDS = set()
 
 # Condition of every post_video run of the merged session, in order, for
 # sessions where the trigger file cannot give it (a video was repeated or a
