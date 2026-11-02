@@ -32,7 +32,7 @@ CAUTION  Step 2 uses the same data that drove the selection, so its q-values
          not as a test.
 
 INPUT   any of: M1_between_subject.csv, M2_within_subject.csv (4_),
-        V2_exploratory.csv (10_vas_meg_DMN.py). The table type is detected
+        V2_exploratory.csv (10_vas_meg_networks.py). The table type is detected
         from its columns.
 
 USAGE

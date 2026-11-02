@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-10_vas_meg_DMN.py
-=================
+10_vas_meg_networks.py
+======================
 Relate the behavioural VAS results of scripts 5-9 to the source-space MEG
 dynamics (same static CSVs, ROI groups and snippet alignment as
 4_meg_behav_link.py, which is imported for loading).
@@ -57,7 +57,7 @@ OUTPUTS (OUT_DIR)
   V3_first_snippet_group.csv  H5 group test of the MEG first-snippet effect
 
 USAGE
-  python 10_vas_meg_DMN.py --static-glob "/path/*static*.csv"
+  python 10_vas_meg_networks.py --static-glob "/path/*static*.csv"
   options: --behav-dir DIR --out DIR --version ecg --n-boot 2000
            --noise-sd 2.0 (override the value taken from script 6)
 """
@@ -153,15 +153,25 @@ def pick_noise_sd(bdir, override):
     return NOISE_SD_FALLBACK
 
 
+def cols(df, wanted, source):
+    """Columns of `wanted` that exist in df; warn about the others (older
+    versions of scripts 5-8 write fewer columns)."""
+    have = [c for c in wanted if c in df.columns]
+    miss = [c for c in wanted if c not in df.columns]
+    if miss:
+        print(f"  note: {source} has no column(s) {miss} - skipped")
+    return have
+
+
 def load_behaviour(bdir, noise_sd):
     fd = bdir / SUBDIRS["fluct"]
     keys = ["subj", "condition", "emotion"]
     desc = _ids(pd.read_csv(fd / "01_series_descriptives.csv"))
-    desc = desc[desc["variant"] == VARIANT][keys + ["mean", "sd", "frac_nonzero", "rvi_sd"]]
+    desc = desc[desc["variant"] == VARIANT][keys + cols(desc, ["mean", "sd", "frac_nonzero", "rvi_sd"], "01")]
 
     fl = _ids(pd.read_csv(fd / "03_fluctuation_per_series.csv"))
     fl = fl[np.isclose(fl["noise_sd"], noise_sd)]
-    lat = fl[fl["variant"] == VARIANT][keys + ["latent_sd", "verdict"]]
+    lat = fl[fl["variant"] == VARIANT][keys + cols(fl, ["latent_sd", "verdict"], "03")]
     lat_d = (fl[fl["variant"] == "detrended"][keys + ["latent_sd"]]
              .rename(columns={"latent_sd": "latent_sd_detrended"}))
     B = desc.merge(lat, on=keys, how="outer").merge(lat_d, on=keys, how="outer")
@@ -171,24 +181,25 @@ def load_behaviour(bdir, noise_sd):
         mx = _ids(pd.read_csv(f9))
         mx = mx[mx["solution"] == "selected"]
         mx["n_classes"] = mx["k"]
-        B = B.merge(mx[keys + ["class_label", "n_classes"]], on=keys, how="left")
+        B = B.merge(mx[keys + cols(mx, ["class_label", "n_classes"], "09")], on=keys, how="left")
 
     f7 = bdir / SUBDIRS["first"] / "first_probe_per_series.csv"
     if f7.exists():
         s7 = _ids(pd.read_csv(f7))
         s7["first_minus_rest"] = s7["first"] - s7["rest_mean"]
-        B = B.merge(s7[keys + ["block_num", "first", "rest_mean", "first_minus_rest",
-                               "slope_per_min", "slope_wo_first"]], on=keys, how="outer")
+        B = B.merge(s7[keys + cols(s7, ["block_num", "first", "rest_mean", "first_minus_rest",
+                                        "slope_per_min", "slope_wo_first"],
+                                   "first_probe_per_series")], on=keys, how="outer")
 
     f8 = bdir / SUBDIRS["induction"] / "induction_per_series.csv"
     if f8.exists():
         s8 = _ids(pd.read_csv(f8))
-        B = B.merge(s8[keys + ["start", "end", "decline"]], on=keys, how="outer")
+        B = B.merge(s8[keys + cols(s8, ["start", "end", "decline"], "induction_per_series")], on=keys, how="outer")
 
     # per subject x block (pair) measures from 04
     dis = _ids(pd.read_csv(fd / "04_dissociation_per_subject_block.csv"))
     dis = dis[(dis["variant"] == VARIANT) & np.isclose(dis["noise_sd"], noise_sd)]
-    pair = dis[["subj", "condition", "corr_sad_fear", "specific_sd"]].drop_duplicates(["subj", "condition"])
+    pair = dis[["subj", "condition"] + cols(dis, ["corr_sad_fear", "specific_sd"], "04")].drop_duplicates(["subj", "condition"])
     return B, pair
 
 
@@ -344,8 +355,9 @@ def run(B, pair, T, bh, out, n_boot):
     out.mkdir(parents=True, exist_ok=True)
     prim, expl = [], []
     for h in HYP:
-        if h["behav"] not in B.columns and h["behav"] not in pair.columns:
-            print(f"{h['id']}: behavioural variable {h['behav']} missing - skipped")
+        need = [h["behav"]] + (["n_classes"] if h["kind"] == "class" else []) + ([h["covar"]] if h["covar"] else [])
+        if any(c not in B.columns and c not in pair.columns for c in need):
+            print(f"{h['id']}: behavioural variable(s) {need} missing - skipped")
             continue
         bvec = behaviour_vector(B, pair, h)
         cvec = covariate_vector(B, h)
@@ -389,12 +401,12 @@ def main():
     ap.add_argument("--static-glob", default=DEFAULT_STATIC_GLOB)
     ap.add_argument("--version", default="ecg")
     ap.add_argument("--behav-dir", default=str(BEHAV))
-    ap.add_argument("--out", default=None, help="default: <behav-dir>/vas_meg_DMN")
+    ap.add_argument("--out", default=None, help="default: <behav-dir>/vas_meg_networks")
     ap.add_argument("--noise-sd", type=float, default=None)
     ap.add_argument("--n-boot", type=int, default=2000)
     a = ap.parse_args()
     bdir = Path(a.behav_dir)
-    out = Path(a.out) if a.out else bdir / "vas_meg_DMN"
+    out = Path(a.out) if a.out else bdir / "vas_meg_networks"
     out.mkdir(parents=True, exist_ok=True)
     m4 = load_module4()
     noise = pick_noise_sd(bdir, a.noise_sd)
