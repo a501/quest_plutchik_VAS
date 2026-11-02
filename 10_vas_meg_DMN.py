@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-10_vas_meg_link.py
-==================
+10_vas_meg_DMN.py
+================
 Relate the behavioural VAS results of scripts 5-9 to the source-space MEG
 dynamics (same static CSVs, ROI groups and snippet alignment as
 4_meg_behav_link.py, which is imported for loading).
@@ -55,7 +55,7 @@ OUTPUTS (OUT_DIR)
   V3_first_snippet_group.csv  H5 group test of the MEG first-snippet effect
 
 USAGE
-  python 10_vas_meg_link.py --static-glob "/path/*static*.csv"
+  python 10_vas_meg_DMN.py --static-glob "/path/*static*.csv"
   options: --behav-dir DIR --out DIR --version ecg --n-boot 2000
            --noise-sd 2.0 (override the value taken from script 6)
 """
@@ -388,12 +388,12 @@ def main():
     ap.add_argument("--static-glob", default=DEFAULT_STATIC_GLOB)
     ap.add_argument("--version", default="ecg")
     ap.add_argument("--behav-dir", default=str(BEHAV))
-    ap.add_argument("--out", default=None, help="default: <behav-dir>/vas_meg_link")
+    ap.add_argument("--out", default=None, help="default: <behav-dir>/vas_meg_DMN")
     ap.add_argument("--noise-sd", type=float, default=None)
     ap.add_argument("--n-boot", type=int, default=2000)
     a = ap.parse_args()
     bdir = Path(a.behav_dir)
-    out = Path(a.out) if a.out else bdir / "vas_meg_link"
+    out = Path(a.out) if a.out else bdir / "vas_meg_DMN"
     out.mkdir(parents=True, exist_ok=True)
     m4 = load_module4()
     noise = pick_noise_sd(bdir, a.noise_sd)
