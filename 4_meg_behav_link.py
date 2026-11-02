@@ -14,9 +14,12 @@ Only one cleaning version is used (default ecg, as decided for SS_emo).
 STEP 0  ROI GROUPS + ALIGNMENT QC
         Units are assigned to networks by name patterns (ROI_GROUPS below).
         The membership is written out -> CHECK IT before trusting anything.
-        Snippet k of a block is aligned to probe k+offset of the same block
-        (snippets are the 19 s before each VAS onset). The number of snippets
-        vs probes per subject x condition is reported; mismatches are flagged.
+        snippet_idx in the static CSVs runs across the session; it is first
+        re-numbered within subject x condition (first snippet of a block = 0,
+        raw index kept as snippet_idx_raw). Snippet k of a block is then
+        aligned to probe k+offset of the same block (snippets are the 19 s
+        before each VAS onset). Cells whose snippet count differs from the
+        probe count (or with gaps) are flagged and left out of steps 2-3.
         -> M0_roi_groups.csv, M0_alignment_qc.csv
 
 STEP 1  BETWEEN-SUBJECT: neural timescale -> emotional dynamics
@@ -133,6 +136,18 @@ def load_meg(pattern, version):
     return m
 
 
+def localize_snippets(m):
+    """snippet_idx in the static CSVs runs across the whole session (baseline
+    0-24, next block ~25-49, ...), while probe_idx in vas_probes_long restarts
+    at 1 in every block. Re-number snippets within subject x condition so that
+    the first snippet of every block is 0. The raw index is kept in
+    snippet_idx_raw for the QC table."""
+    m = m.copy()
+    m["snippet_idx_raw"] = m["snippet_idx"]
+    m["snippet_idx"] = m["snippet_idx"] - m.groupby(["subj", "condition"])["snippet_idx"].transform("min")
+    return m
+
+
 def roi_groups(m, out):
     rows = []
     for u in sorted(m["unit_name"].unique()):
@@ -176,15 +191,37 @@ def probe_table(behav_dir):
 # ==========================================================================
 # step 0 alignment
 # ==========================================================================
-def alignment(mg, d, offset, out):
-    sn = mg.groupby(["subj", "condition"])["snippet_idx"].agg(["min", "max", "nunique"]).reset_index()
+def alignment(m, d, offset, out):
+    """QC of the snippet -> probe alignment (within-block snippet index).
+    Returns the subject x condition cells that are safe to use in steps 2-3:
+    MEG snippet count equal to the probe count of that block."""
+    sn = m.groupby(["subj", "condition"]).agg(
+        min=("snippet_idx", "min"), max=("snippet_idx", "max"), nunique=("snippet_idx", "nunique"),
+        raw_min=("snippet_idx_raw", "min"), raw_max=("snippet_idx_raw", "max")).reset_index()
     pr = (d.drop_duplicates(["subj", "condition", "probe_idx"]).groupby(["subj", "condition"])
           ["probe_idx"].max().rename("n_probes_valid_max").reset_index())
     q = sn.merge(pr, how="outer", on=["subj", "condition"])
     q["snippet_offset_used"] = offset
-    q["flag_count_mismatch"] = (q["max"] + offset) > q["n_probes_valid_max"] + 2
+    q["flag_no_meg"] = q["nunique"].isna()
+    q["flag_no_behav"] = q["n_probes_valid_max"].isna() & ~q["flag_no_meg"]
+    # count mismatch: more/fewer snippets than probes, or a gap in the snippet sequence
+    q["flag_count_mismatch"] = ~q["flag_no_meg"] & ~q["flag_no_behav"] & (
+        (q["nunique"] != q["n_probes_valid_max"]) | (q["max"] + 1 != q["nunique"]))
+    # block order in the MEG numbering should follow the session (baseline first);
+    # informational only - the within-block index does not depend on it
+    order = q.dropna(subset=["raw_min"]).sort_values("raw_min").groupby("subj")["condition"].first()
+    q["flag_baseline_not_first"] = q["subj"].map(order).fillna("baseline").ne("baseline") & ~q["flag_no_meg"]
+    q["use_within"] = ~(q["flag_no_meg"] | q["flag_no_behav"] | q["flag_count_mismatch"])
     q.to_csv(out / "M0_alignment_qc.csv", index=False)
-    print(f"alignment: {int(q['flag_count_mismatch'].sum())} subject x condition cells flagged")
+    print(f"alignment (within-block snippet index, offset {offset}): "
+          f"{int(q['use_within'].sum())} cells usable, {int(q['flag_count_mismatch'].sum())} count mismatch, "
+          f"{int(q['flag_no_meg'].sum())} without MEG, "
+          f"{q.loc[q['flag_baseline_not_first'], 'subj'].nunique()} subjects with baseline not first in MEG numbering")
+    return q.loc[q["use_within"], ["subj", "condition"]]
+
+
+def keep_cells(x, cells):
+    return x.merge(cells, on=["subj", "condition"], how="inner")
 
 
 # ==========================================================================
@@ -370,7 +407,7 @@ def main():
     ap.add_argument("--behav-dir", default=str(BEHAV_DIR))
     ap.add_argument("--out", default=None, help="default: behav-dir")
     ap.add_argument("--snippet-offset", type=int, default=None,
-                    help="probe_idx = snippet_idx + offset (default: 1 if snippets start at 0, else 0)")
+                    help="probe_idx = within-block snippet index + offset (default 1)")
     ap.add_argument("--n-perm", type=int, default=200)
     ap.add_argument("--skip", nargs="*", default=[], choices=["between", "within", "decoding"])
     a = ap.parse_args()
@@ -378,19 +415,20 @@ def main():
     out = Path(a.out) if a.out else bdir
     out.mkdir(parents=True, exist_ok=True)
 
-    m = load_meg(a.static_glob, a.version)
+    m = localize_snippets(load_meg(a.static_glob, a.version))
     G = roi_groups(m, out)
     mg = group_values(m, G)
     d = probe_table(bdir)
-    offset = a.snippet_offset if a.snippet_offset is not None else (1 if m["snippet_idx"].min() == 0 else 0)
+    # within-block snippet index starts at 0 -> snippet k precedes probe k+1
+    offset = a.snippet_offset if a.snippet_offset is not None else 1
     print(f"snippet -> probe offset: {offset}")
-    alignment(mg, d, offset, out)
+    cells = alignment(m, d, offset, out)
     if "between" not in a.skip:
-        between(mg, bdir, out)
+        between(mg, bdir, out)          # subject means per block: no snippet alignment needed
     if "within" not in a.skip:
-        within(mg, d, offset, out)
+        within(keep_cells(mg, cells), d, offset, out)
     if "decoding" not in a.skip:
-        decoding(m, d, offset, out, a.n_perm)
+        decoding(keep_cells(m, cells), d, offset, out, a.n_perm)
 
 
 if __name__ == "__main__":
