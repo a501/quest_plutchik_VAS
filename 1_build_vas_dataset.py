@@ -79,6 +79,13 @@ OUT_DIR = ROOT / "dynamics_models"
 DROP_FIRST_PAIR = True
 REST_MIN_S, REST_MAX_S = 18 * 60, 22 * 60
 MATCH_TOL_S = 5.0
+# Video order set by hand where the trigger file is wrong. Takes precedence
+# over triggers and parity; cond_source = "override" in qc_build.csv.
+#   030: trigger file says sad-fear but only 25% of probes match it; the MEG
+#        cut (video triggers 7/8 in the raw MEG), subject parity (even) and
+#        the post-video ratings (video 1: Fear 40 > Sadness 15; video 2:
+#        Sadness 65 > Fear 20) all say fear-sad.
+ORDER_OVERRIDE = {"030": ["fear", "sad"]}
 VAS_START, VAS_STEP, VAS_MIN, VAS_MAX = 50, 5, 0, 100
 
 C_REST_ON, C_REST_OFF, C_PROBE_ON, C_SCREEN = 1, 2, 3, 4
@@ -258,8 +265,9 @@ def process_subject(subj):
 
     order_par = parity_order(subj)
     order_trg = trigger_order(t)
-    order = order_trg or order_par
-    qc["cond_source"] = "triggers" if order_trg else "parity"
+    order = ORDER_OVERRIDE.get(subj) or order_trg or order_par
+    qc["cond_source"] = ("override" if subj in ORDER_OVERRIDE
+                         else "triggers" if order_trg else "parity")
     qc["order_parity"] = "-".join(order_par)
     qc["order_triggers"] = "-".join(order_trg) if order_trg else ""
     qc["order_conflict"] = bool(order_trg and order_trg != order_par)

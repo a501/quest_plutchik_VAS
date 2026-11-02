@@ -45,13 +45,15 @@ HYPOTHESES (one PRIMARY test each; Holm across the primaries)
   H7 state coupling across the 3 blocks within person (repeated-measures
                    correlation): latent_sd ~ DMN LZC
   Each hypothesis also runs an EXPLORATORY grid over all networks x
-  MEG_MEASURES x methods, BH-FDR within the hypothesis.
+  MEG_MEASURES x methods (2 x 4 x 12 = 96 tests per hypothesis), written
+  UNCORRECTED. Screen it for recurring measures and FDR-correct only the
+  selected set with 11_meg_screen_select.py.
 
 OUTPUTS (OUT_DIR)
   V0_behaviour_table.csv   merged behavioural variables (check it first)
   V0_meg_table.csv         network-level MEG summaries
   V1_primary.csv           7 primary tests, Holm-corrected
-  V2_exploratory.csv       all grid tests, BH-FDR within hypothesis
+  V2_exploratory.csv       all grid tests, uncorrected p
   V3_first_snippet_group.csv  H5 group test of the MEG first-snippet effect
 
 USAGE
@@ -363,8 +365,7 @@ def run(B, pair, T, bh, out, n_boot):
     P = pd.DataFrame(prim)
     P["p_holm"] = holm(P["p"])
     P.to_csv(out / "V1_primary.csv", index=False)
-    E = pd.DataFrame(expl)
-    E["p_fdr_within_hyp"] = E.groupby("hyp")["p"].transform(lambda p: pd.Series(bh(p.values), index=p.index))
+    E = pd.DataFrame(expl)          # uncorrected: screen and select with 11_meg_screen_select.py
     E.to_csv(out / "V2_exploratory.csv", index=False)
 
     # H5 group check: is there a first-snippet effect in MEG at all (any block)?
