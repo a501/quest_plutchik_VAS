@@ -358,9 +358,16 @@ def part3(S, B, Bm, n_boot, rng, out):
             sel_rows.append(dict(method=meth, k=k, n=n, bic=gm.bic(X), min_class_n=int(sizes.min()),
                                  stability_ari=ari, passes=ok))
         sel = pd.DataFrame([r for r in sel_rows if r["method"] == meth])
-        ok = sel[sel["passes"]]
-        k_sel = int(ok.loc[ok["bic"].idxmin(), "k"])
         k_bic = int(sel.loc[sel["bic"].idxmin(), "k"])
+        # same rule as script 5: step up from k = 2 while every criterion passes
+        k_sel = 1
+        for _, r in sel.sort_values("k").iterrows():
+            if r["k"] == 1:
+                continue
+            if r["passes"] and r["k"] <= max(k_bic, 2):
+                k_sel = int(r["k"])
+            else:
+                break
         print(f"\nPART 3 {meth}: BIC prefers k = {k_bic}; with size and stability criteria k = {k_sel}"
               + ("  (continuum: no neural types)" if k_sel == 1 else ""))
         gm, lab = fits[k_sel]
