@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 10_vas_meg_DMN.py
-================
+=================
 Relate the behavioural VAS results of scripts 5-9 to the source-space MEG
 dynamics (same static CSVs, ROI groups and snippet alignment as
 4_meg_behav_link.py, which is imported for loading).
