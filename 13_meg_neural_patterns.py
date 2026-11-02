@@ -44,10 +44,14 @@ PART 3  TYPES OF PEOPLE  (latent profile analysis)
 PART 4  BRAIN STATES OVER TIME  (hidden Markov model)
         Snippet-level factor scores (the 19 s before each VAS probe; network
         average of the 12 measures, baseline model of part 1), one sequence
-        per subject x block, centred within subject (--hmm-center subject,
-        default: states then describe changes WITHIN a person, not
-        differences between people; use --hmm-center none for the raw
-        scores). Gaussian HMM, K = 2..MAX_STATES by BIC, several restarts.
+        per subject x block, centred within subject x block (--hmm-center
+        block, default: states then describe changes WITHIN a block, not
+        offsets between blocks or recordings; 'subject' or 'none' keep
+        them; --hmm-detrend also removes a linear drift per block).
+        Gaussian HMM, K = 2..--max-states. BIC keeps falling with thousands
+        of non-normal snippets, so K is chosen by held-out log-likelihood
+        (subjects split into CV_FOLDS folds) among solutions in which every
+        state holds >= MIN_STATE_OCC of the snippets; BIC is reported too.
         Per subject x block: fractional occupancy of each state, switch rate,
         mean dwell (snippets). Related to the behaviour per block, and
         state-locked ratings: is the rating that follows a snippet in state s
@@ -60,7 +64,16 @@ PART 4  BRAIN STATES OVER TIME  (hidden Markov model)
            P4_hmm_subject_block.csv, P4_hmm_vs_behaviour.csv,
            P4_state_locked_ratings.csv
 
-All tests are rank-based and UNCORRECTED (description). Behaviour: mean of
+DISTRIBUTIONS  The MEG measures are skewed (|skew| up to ~6, most fail
+        Shapiro-Wilk), and factor analysis, Gaussian mixtures and the HMM
+        assume normal data. They are therefore transformed first
+        (--transform rankint, default: rank-based inverse normal, pooled over
+        subjects, blocks and networks per method x measure; or log / raw).
+        P0_distributions.csv shows skew, kurtosis, Shapiro p and the largest
+        |z| before and after.
+All behaviour tests are rank-based (Spearman / partial Spearman, Wilcoxon,
+Kruskal-Wallis), because the behavioural statistics are skewed with exact
+zeros (script 9). All tests are UNCORRECTED (description). Behaviour: mean of
 the two scales per subject x block from V0_behaviour_table.csv (script 10);
 latent_sd is always partialled on the mean level, as in 10_ and 12_.
 
@@ -68,8 +81,9 @@ USAGE (cluster)
   cd /home/ZhangJianfeng_04/emo_study/Behav/
   export PATH="/home/ZhangJianfeng_04/.conda/envs/MEG_env/bin:$PATH"
   python3 13_meg_neural_patterns.py
-  options: --n-factors K (override parallel analysis) --skip-hmm
-           --hmm-center {subject,none} --n-boot 200
+  options: --transform {rankint,log,raw} --n-factors K --skip-hmm
+           --hmm-center {block,subject,none} --hmm-detrend --max-states 8
+           --n-boot 200
 """
 import argparse
 import importlib.util
@@ -98,7 +112,9 @@ N_PARALLEL = 1000
 MAX_PROFILES = 5
 MIN_CLASS_N = 5
 MIN_ARI = 0.60
-MAX_STATES = 5
+MAX_STATES = 8
+CV_FOLDS = 5                 # HMM: number of states chosen on held-out subjects
+MIN_STATE_OCC = 0.05         # every state must hold >= 5% of the snippets
 HMM_RESTARTS = 10
 MIN_SEQ = 10
 MIN_N = 12
@@ -148,6 +164,52 @@ def behaviour_test(x, g, bv):
 
 def tucker(a, b):
     return float(np.dot(a, b) / np.sqrt(np.dot(a, a) * np.dot(b, b)))
+
+
+# ==========================================================================
+# distributions
+# ==========================================================================
+def transform_values(df, how, value="level", by=("method", "measure")):
+    """Make the MEG measures closer to normal before the Gaussian models
+    (factor analysis, mixtures, HMM). Pooled over subjects, blocks and
+    networks within method x measure, so block differences are kept.
+      rankint  rank-based inverse normal transform (handles skew of either
+               sign and outliers; default)
+      log      log of positive measures (helps right skew only)
+      raw      unchanged"""
+    df = df.copy()
+    if how == "raw":
+        return df
+    g = df.groupby(list(by))[value]
+    if how == "log":
+        pos = g.transform("min") > 0
+        df.loc[pos, value] = np.log(df.loc[pos, value])
+        return df
+    r = g.rank(method="average")
+    n = g.transform("count")
+    df[value] = stats.norm.ppf((r - 0.5) / n)
+    return df
+
+
+def distribution_report(T_raw, T_tr, out):
+    rows = []
+    for lab, T in (("raw", T_raw), ("transformed", T_tr)):
+        x = T[(T["condition"] == "baseline") & T["measure"].isin(MEASURES)]
+        for (meth, meas), g in x.groupby(["method", "measure"]):
+            v = g.groupby("subj")["level"].mean().dropna()
+            if len(v) < 8:
+                continue
+            z = (v - v.mean()) / v.std()
+            rows.append(dict(data=lab, method=meth, measure=meas, n=len(v), skew=stats.skew(v),
+                             excess_kurtosis=stats.kurtosis(v), shapiro_p=stats.shapiro(v).pvalue,
+                             max_abs_z=float(z.abs().max())))
+    D = pd.DataFrame(rows)
+    D.to_csv(out / "P0_distributions.csv", index=False)
+    s_ = D.groupby("data").agg(median_abs_skew=("skew", lambda v: np.median(np.abs(v))),
+                               n_shapiro_p05=("shapiro_p", lambda v: int((v < .05).sum())),
+                               n=("skew", "size"))
+    print("PART 0 distributions of the baseline MEG measures (subject means over networks):")
+    print(s_.to_string())
 
 
 # ==========================================================================
@@ -359,12 +421,13 @@ def part3(S, B, Bm, n_boot, rng, out):
                                  stability_ari=ari, passes=ok))
         sel = pd.DataFrame([r for r in sel_rows if r["method"] == meth])
         k_bic = int(sel.loc[sel["bic"].idxmin(), "k"])
-        # same rule as script 5: step up from k = 2 while every criterion passes
+        # same rule as script 5: step up from k = 2 while every criterion passes,
+        # never beyond the k that BIC prefers
         k_sel = 1
         for _, r in sel.sort_values("k").iterrows():
             if r["k"] == 1:
                 continue
-            if r["passes"] and r["k"] <= max(k_bic, 2):
+            if r["passes"] and r["k"] <= k_bic:
                 k_sel = int(r["k"])
             else:
                 break
@@ -411,11 +474,13 @@ def part3(S, B, Bm, n_boot, rng, out):
 # ==========================================================================
 # PART 4 - HMM brain states
 # ==========================================================================
-def snippet_factor_scores(m4, models, pattern, version, out):
+def snippet_factor_scores(m4, models, pattern, version, transform, out):
     m = m4.localize_snippets(m4.load_meg(pattern, version))
     m = m[m["measure"].isin(MEASURES)]
     G = m4.roi_groups(m, out)
     mg = m4.group_values(m, G)                      # network mean per snippet
+    # same transform as the subject-level data, pooled over all snippets
+    mg = transform_values(mg, transform, value="value")
     wb = (mg.groupby(["subj", "condition", "snippet_idx", "method", "measure"])["value"]
           .mean().unstack("measure").reindex(columns=MEASURES))
     rows = []
@@ -423,7 +488,7 @@ def snippet_factor_scores(m4, models, pattern, version, out):
         if meth not in wb.index.get_level_values("method"):
             continue
         x = wb.xs(meth, level="method").dropna()
-        Z = ((x - md["mu"]) / md["sd"]).values
+        Z = ((x - x.mean()) / x.std()).values      # snippet scale differs from subject means
         Sc = fa_scores(md["fa"], md["sign"], md["order"], Z)
         f = pd.DataFrame(Sc, index=x.index, columns=[f"F{j + 1}" for j in range(md["k"])]).reset_index()
         f["method"] = meth
@@ -431,39 +496,72 @@ def snippet_factor_scores(m4, models, pattern, version, out):
     return pd.concat(rows, ignore_index=True), m
 
 
-def fit_hmm(seqs, rng):
+def _best_hmm(seqs, K, restarts, rng):
     from hmmlearn.hmm import GaussianHMM
+    X, L = np.vstack(seqs), [len(s) for s in seqs]
+    best = None
+    for _ in range(restarts):
+        mdl = GaussianHMM(K, covariance_type="full", n_iter=500, min_covar=1e-3,
+                          random_state=int(rng.integers(1e9)))
+        try:
+            mdl.fit(X, L)
+            ll = mdl.score(X, L)
+        except Exception:
+            continue
+        if np.isfinite(ll) and (best is None or ll > best[1]):
+            best = (mdl, ll)
+    return best
+
+
+def fit_hmm(seqs, subj_of_seq, max_states, rng):
+    """For each K: model on all data (BIC, occupancy) and the held-out
+    log-likelihood per snippet with subjects split into CV_FOLDS folds.
+    BIC keeps falling with thousands of snippets and non-normal data, so K is
+    chosen on the held-out likelihood."""
     X = np.vstack(seqs)
-    L = [len(s) for s in seqs]
     d = X.shape[1]
+    subs = np.unique(subj_of_seq)
+    folds = np.array_split(rng.permutation(subs), CV_FOLDS)
     res = []
-    for K in range(2, MAX_STATES + 1):
-        best = None
-        for r in range(HMM_RESTARTS):
-            mdl = GaussianHMM(K, covariance_type="full", n_iter=500, min_covar=1e-3,
-                              random_state=int(rng.integers(1e9)))
-            try:
-                mdl.fit(X, L)
-                ll = mdl.score(X, L)
-            except Exception:
-                continue
-            if np.isfinite(ll) and (best is None or ll > best[1]):
-                best = (mdl, ll)
+    for K in range(2, max_states + 1):
+        best = _best_hmm(seqs, K, HMM_RESTARTS, rng)
         if best is None:
             continue
+        mdl, ll = best
+        states = mdl.predict(X, [len(s) for s in seqs])
+        occ = np.bincount(states, minlength=K) / len(states)
+        cv_ll, cv_n = 0.0, 0
+        for f in folds:
+            test = [s for s, sb in zip(seqs, subj_of_seq) if sb in set(f)]
+            train = [s for s, sb in zip(seqs, subj_of_seq) if sb not in set(f)]
+            b = _best_hmm(train, K, max(2, HMM_RESTARTS // 3), rng)
+            if b is None or not test:
+                cv_ll = np.nan
+                break
+            cv_ll += b[0].score(np.vstack(test), [len(s) for s in test])
+            cv_n += sum(len(s) for s in test)
         npar = (K - 1) + K * (K - 1) + K * d + K * d * (d + 1) / 2
-        res.append(dict(K=K, model=best[0], loglik=best[1], n_params=npar,
-                        bic=-2 * best[1] + npar * np.log(len(X))))
+        res.append(dict(K=K, model=mdl, loglik=ll, n_params=npar,
+                        bic=-2 * ll + npar * np.log(len(X)),
+                        cv_loglik_per_snippet=cv_ll / cv_n if cv_n else np.nan,
+                        min_state_occupancy=float(occ.min())))
     return res
 
 
-def part4(m4, models, Bm, pattern, version, center, rng, out):
+def choose_k(res):
+    ok = [r for r in res if r["min_state_occupancy"] >= MIN_STATE_OCC and np.isfinite(r["cv_loglik_per_snippet"])]
+    if not ok:
+        return min(res, key=lambda r: r["bic"])
+    return max(ok, key=lambda r: r["cv_loglik_per_snippet"])
+
+
+def part4(m4, models, Bm, pattern, version, center, detrend, transform, max_states, rng, out):
     try:
         import hmmlearn  # noqa: F401
     except ImportError:
         print("\nPART 4 skipped: hmmlearn missing (pip install hmmlearn in MEG_env)")
         return
-    F, m = snippet_factor_scores(m4, models, pattern, version, out)
+    F, m = snippet_factor_scores(m4, models, pattern, version, transform, out)
     d = m4.probe_table(BEHAV_DM)
     cells = m4.alignment(m, d, 1, out)                 # also writes M0_alignment_qc.csv here
     F = F.merge(cells, on=["subj", "condition"], how="inner")
@@ -473,6 +571,13 @@ def part4(m4, models, Bm, pattern, version, center, rng, out):
         f = f.dropna(subset=fcols).sort_values(["subj", "condition", "snippet_idx"]).copy()
         if center == "subject":
             f[fcols] = f[fcols] - f.groupby("subj")[fcols].transform("mean")
+        elif center == "block":
+            f[fcols] = f[fcols] - f.groupby(["subj", "condition"])[fcols].transform("mean")
+        if detrend:       # remove a linear drift within each block
+            for c in fcols:
+                f[c] = f.groupby(["subj", "condition"], group_keys=False)[[c, "snippet_idx"]].apply(
+                    lambda g: g[c] - np.polyval(np.polyfit(g["snippet_idx"], g[c], 1), g["snippet_idx"])
+                    if len(g) > 2 else g[c] - g[c].mean())
         keys, seqs = [], []
         for (s_, c), g in f.groupby(["subj", "condition"]):
             if len(g) >= MIN_SEQ:
@@ -480,15 +585,20 @@ def part4(m4, models, Bm, pattern, version, center, rng, out):
                 seqs.append(g[fcols].values)
         if len(seqs) < MIN_N:
             continue
-        res = fit_hmm(seqs, rng)
+        res = fit_hmm(seqs, np.array([k_[0] for k_ in keys]), max_states, rng)
+        best = choose_k(res)
         for r in res:
-            sel_rows.append(dict(method=meth, K=r["K"], loglik=r["loglik"], n_params=r["n_params"], bic=r["bic"]))
-        best = min(res, key=lambda r: r["bic"])
+            sel_rows.append(dict(method=meth, K=r["K"], loglik=r["loglik"], n_params=r["n_params"], bic=r["bic"],
+                                 cv_loglik_per_snippet=r["cv_loglik_per_snippet"],
+                                 min_state_occupancy=r["min_state_occupancy"], selected=r is best))
         mdl, K = best["model"], best["K"]
         order = np.argsort(mdl.means_[:, 0])            # state 1 = lowest F1
         remap = {old: new + 1 for new, old in enumerate(order)}
-        print(f"\nPART 4 {meth}: {len(seqs)} sequences, BIC prefers K = {K}"
-              + ("  (largest tried - consider a larger MAX_STATES)" if K == MAX_STATES else ""))
+        k_bic = min(res, key=lambda r: r["bic"])["K"]
+        print(f"\nPART 4 {meth}: {len(seqs)} sequences, centring {center}"
+              f"{' + detrend' if detrend else ''}; BIC prefers K = {k_bic}, held-out likelihood "
+              f"(states >= {MIN_STATE_OCC:.0%} occupancy) -> K = {K}"
+              + ("  (largest tried - consider a larger --max-states)" if K == max_states else ""))
         for old, new in remap.items():
             st_rows.append(dict(method=meth, K=K, state=new,
                                 **{f"{c}_mean": mdl.means_[old, i] for i, c in enumerate(fcols)}))
@@ -568,7 +678,11 @@ def main():
     ap.add_argument("--n-factors", type=int, default=None)
     ap.add_argument("--n-boot", type=int, default=200)
     ap.add_argument("--skip-hmm", action="store_true")
-    ap.add_argument("--hmm-center", choices=["subject", "none"], default="subject")
+    ap.add_argument("--hmm-center", choices=["block", "subject", "none"], default="block")
+    ap.add_argument("--hmm-detrend", action="store_true",
+                    help="also remove a linear drift within each block before the HMM")
+    ap.add_argument("--max-states", type=int, default=MAX_STATES)
+    ap.add_argument("--transform", choices=["rankint", "log", "raw"], default="rankint")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -576,7 +690,9 @@ def main():
     rng = np.random.default_rng(SEED)
     pd.set_option("display.width", 220)
 
-    T = pd.read_csv(net / "V0_meg_table.csv", dtype={"subj": str})
+    T_raw = pd.read_csv(net / "V0_meg_table.csv", dtype={"subj": str})
+    T = transform_values(T_raw, a.transform)
+    print(f"MEG measures transformed: {a.transform}")
     B = pd.read_csv(net / "V0_behaviour_table.csv", dtype={"subj": str})
     bvars = [v for v in BEHAV_VARS if v in B.columns]
     Bm = B.groupby(["subj", "condition"])[bvars].mean().reset_index()   # mean of the two scales
@@ -585,11 +701,13 @@ def main():
         print(f"note: measures not in V0_meg_table: {missing} - dropped")
         MEASURES[:] = [m for m in MEASURES if m not in missing]
 
+    distribution_report(T_raw, T, out)
     models, S = part1(T, Bm, a.n_factors, rng, out)
     part2(T, Bm, models, out)
     part3(S, B, Bm, a.n_boot, rng, out)
     if not a.skip_hmm:
-        part4(load_module4(), models, Bm, a.static_glob, a.version, a.hmm_center, rng, out)
+        part4(load_module4(), models, Bm, a.static_glob, a.version, a.hmm_center, a.hmm_detrend,
+              a.transform, a.max_states, rng, out)
     print(f"\noutputs in {out}")
 
 

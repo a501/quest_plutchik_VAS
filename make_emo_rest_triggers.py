@@ -24,7 +24,13 @@ TWO KINDS OF SPLIT RECORDING, handled differently
      is separate then has no video triggers (codes 7/8) at all, which is what
      produced the ORDER CONFLICT and low trig_match flags in the build step.
 
-PIECE ORDER (from the Windows script)
+PIECE ORDER
+  Pieces are ordered by their recording start time (info['meas_date']).
+  The file-name rule below is only the fallback when a piece has no
+  meas_date; a disagreement between the two is printed. (The name rule put
+  030's bare piece first although it was recorded last, which swapped the
+  video order in 030's trigger CSV.)
+  File-name fallback (from the Windows script):
   - bare / unsuffixed piece -> first
   - "baseline"              -> next
   - everything else         -> natural sort: 1 < 1_2 < 2 < 3 < "foo"
@@ -219,7 +225,35 @@ def find_files(src, subjects=None):
             if REQUIRE_TSSS and "tsss" not in p.name.lower():
                 continue
             found.setdefault(d.name, []).append((piece_token(p.name, d.name), p))
-    return {s: sorted(v, key=lambda pf: piece_sort_key(pf[0])) for s, v in found.items()}
+    out = {}
+    for s, v in found.items():
+        by_name = sorted(v, key=lambda pf: piece_sort_key(pf[0]))
+        out[s] = order_by_recording_time(s, by_name)
+    return out
+
+
+def order_by_recording_time(subj, by_name):
+    """Order pieces by their recording start (info['meas_date']). The file-name
+    rule is only a fallback: for 030 it put the bare piece (recorded LAST,
+    03:56, sad video) before 030_emo_rest_1_2 (03:06, baseline + fear video),
+    which swapped the video order in the trigger CSV."""
+    if len(by_name) < 2:
+        return by_name
+    times = []
+    for piece, path in by_name:
+        try:
+            md = mne.io.read_info(path, verbose=False)["meas_date"]
+        except Exception:
+            md = None
+        times.append(md)
+    if any(t is None for t in times):
+        print(f"[{subj}] meas_date missing for a piece - using the file-name order")
+        return by_name
+    by_time = [pf for _, pf in sorted(zip(times, by_name), key=lambda x: x[0])]
+    if [p for p, _ in by_time] != [p for p, _ in by_name]:
+        print(f"[{subj}] !! file-name order {[p or '(bare)' for p, _ in by_name]} differs from "
+              f"recording-time order {[p or '(bare)' for p, _ in by_time]} -> using recording time")
+    return by_time
 
 
 def main():
