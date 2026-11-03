@@ -25,7 +25,11 @@ TWO KINDS OF SPLIT RECORDING, handled differently
      produced the ORDER CONFLICT and low trig_match flags in the build step.
 
 PIECE ORDER
-  Pieces are ordered by their recording start time (info['meas_date']).
+  1. CONTENT (decisive): the session starts with the baseline rest, so the
+     piece that contains it (a rest onset, code 1, before any video trigger
+     7/8) is put first. This depends neither on file names nor on the
+     recording clock.
+  2. Otherwise pieces are ordered by their recording start (info['meas_date']).
   The file-name rule below is only the fallback when a piece has no
   meas_date; a disagreement between the two is printed. (The name rule put
   030's bare piece first although it was recorded last, which swapped the
@@ -200,15 +204,39 @@ def build_trigger_df(marker, sfreq):
     return df
 
 
+def piece_has_baseline(marker):
+    """True if a rest onset (code 1) occurs before the first video trigger
+    (code 7 = sad, 8 = fear), i.e. the piece starts with the baseline rest."""
+    rest = np.flatnonzero(marker == 1)
+    vid = np.flatnonzero((marker == 7) | (marker == 8))
+    if not len(rest):
+        return False
+    return not len(vid) or rest[0] < vid[0]
+
+
 def extract_subject(ordered):
     """Reconstruct every piece, concatenate in order, then detect events once."""
-    markers, sfreqs, info = [], [], []
+    markers, sfreqs, info, base = [], [], [], []
     for piece, path in ordered:
         m, sf, nparts = reconstruct_markers(path)
         markers.append(m)
         sfreqs.append(sf)
+        has_base = piece_has_baseline(m)
+        base.append(has_base)
         info.append(f"        {path.name}: {nparts} auto-split part(s), "
-                    f"{len(m) / sf / 60:.1f} min")
+                    f"{len(m) / sf / 60:.1f} min, "
+                    f"{'contains the baseline rest' if has_base else 'starts with a video'}")
+    # CONTENT CHECK: the session starts with the baseline rest, so the piece that
+    # contains it (a rest onset before any video trigger) must come first. This
+    # does not depend on file names or on the recording clock.
+    if len(markers) > 1 and sum(base) == 1 and not base[0]:
+        k = base.index(True)
+        print(f"        content check: {ordered[k][1].name} holds the baseline -> moved first")
+        for lst in (markers, sfreqs, info):
+            lst.insert(0, lst.pop(k))
+    elif len(markers) > 1 and sum(base) != 1:
+        print(f"        content check: {sum(base)} piece(s) start with a baseline rest - "
+              "order kept as listed, CHECK IT")
     for line in info:
         print(line)
     if len(set(sfreqs)) > 1:
