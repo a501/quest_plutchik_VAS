@@ -27,8 +27,14 @@ PART 2  NETWORK-SPECIFIC PATTERNS
         deviation between blocks; near 0 = noise); (c) does it relate to
         behaviour beyond the whole-brain score (partial correlation
         controlling for the whole-brain factor score).
+        (d) each network on its own: link with behaviour per network, and
+        bootstrap test whether two networks differ in that link.
         -> P2_network_specific_variance.csv, P2_network_deviation_stability.csv,
-           P2_network_deviation_vs_behaviour.csv
+           P2_network_deviation_vs_behaviour.csv, P2_group_scores_vs_behaviour.csv,
+           P2_group_differences.csv
+        With --roi-set self the "networks" are the three levels of self
+        (interoceptive, exteroceptive, mental self; run
+        10_vas_meg_networks.py --roi-set self first).
 
 PART 3  TYPES OF PEOPLE  (latent profile analysis)
         Gaussian mixtures with 1..MAX_PROFILES classes on the baseline factor
@@ -81,6 +87,7 @@ USAGE (cluster)
   cd /home/ZhangJianfeng_04/emo_study/Behav/
   export PATH="/home/ZhangJianfeng_04/.conda/envs/MEG_env/bin:$PATH"
   python3 13_meg_neural_patterns.py
+  python3 13_meg_neural_patterns.py --roi-set self     # three levels of self
   options: --transform {rankint,log,raw} --n-factors K --skip-hmm
            --hmm-center {block,subject,none} --hmm-detrend --max-states 8
            --n-boot 200
@@ -376,6 +383,58 @@ def part2(T, Bm, models, out):
                                      factor=f.replace("_dev", ""), behaviour=bv,
                                      controls=" + ".join(["whole-brain score"] + covs[1:]),
                                      n=n, rho=r, p=p))
+    # (d) each network / level on its own (not relative to the whole brain): does
+    #     the link with behaviour differ between groups? bootstrap over subjects
+    lev_rows, diff_rows = [], []
+    rng_b = np.random.default_rng(SEED + 7)
+    for (meth, blk), g in W.groupby(["method", "condition"]):
+        for f in fcols:
+            fl = f.replace("_dev", "_level")
+            for bv in [v for v in BEHAV_VARS if v in g]:
+                wide = g.assign(**{fl: g[f] + g[f.replace("_dev", "_whole")]}).pivot_table(
+                    index="subj", columns="network", values=fl)
+                y = g.drop_duplicates("subj").set_index("subj")
+                y = y.reindex(wide.index)
+                cov = y[["mean"]].values if bv == "latent_sd" else None
+                nets = list(wide.columns)
+                rhos = {}
+                for net in nets:
+                    r, p, n = partial_rank(wide[net].values, y[bv].values, cov)
+                    rhos[net] = r
+                    lev_rows.append(dict(method=meth, condition=blk, network=net,
+                                         factor=f.replace("_dev", ""), behaviour=bv,
+                                         partial_on_mean=bv == "latent_sd", n=n, rho=r, p=p))
+                ok = np.isfinite(y[bv].values) & np.isfinite(wide.values).all(1)
+                if cov is not None:
+                    ok &= np.isfinite(cov).all(1)
+                idx = np.flatnonzero(ok)
+                if len(idx) < MIN_N:
+                    continue
+                boots = {net: [] for net in nets}
+                for _ in range(1000):
+                    i = rng_b.choice(idx, len(idx))
+                    for net in nets:
+                        boots[net].append(partial_rank(wide[net].values[i], y[bv].values[i],
+                                                       cov[i] if cov is not None else None)[0])
+                for a_i in range(len(nets)):
+                    for b_i in range(a_i + 1, len(nets)):
+                        d = np.array(boots[nets[a_i]]) - np.array(boots[nets[b_i]])
+                        d = d[np.isfinite(d)]
+                        if not len(d):
+                            continue
+                        diff_rows.append(dict(method=meth, condition=blk, factor=f.replace("_dev", ""),
+                                              behaviour=bv, group_a=nets[a_i], group_b=nets[b_i],
+                                              rho_a=rhos[nets[a_i]], rho_b=rhos[nets[b_i]],
+                                              diff=rhos[nets[a_i]] - rhos[nets[b_i]],
+                                              ci_lo=np.percentile(d, 2.5), ci_hi=np.percentile(d, 97.5),
+                                              p_boot=float(min(1.0, 2 * min(np.mean(d <= 0), np.mean(d >= 0))))))
+    pd.DataFrame(lev_rows).to_csv(out / "P2_group_scores_vs_behaviour.csv", index=False)
+    Dd = pd.DataFrame(diff_rows)
+    Dd.to_csv(out / "P2_group_differences.csv", index=False)
+    if len(Dd):
+        show(Dd[Dd["p_boot"] < .05].rename(columns={"p_boot": "p"}),
+             "PART 2 groups differ in their link with behaviour (bootstrap), p < .05")
+
     St, R = pd.DataFrame(stab_rows), pd.DataFrame(beh_rows)
     St.to_csv(out / "P2_network_deviation_stability.csv", index=False)
     R.to_csv(out / "P2_network_deviation_vs_behaviour.csv", index=False)
@@ -671,10 +730,13 @@ def show(df, title):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--net-dir", default=str(NET_DIR))
+    ap.add_argument("--net-dir", default=None, help="default: vas_meg_networks (or vas_meg_self)")
+    ap.add_argument("--roi-set", choices=["networks", "self"], default="networks",
+                    help="self: interoceptive / exteroceptive / mental self; needs "
+                         "10_vas_meg_networks.py --roi-set self first")
     ap.add_argument("--static-glob", default=DEFAULT_STATIC_GLOB)
     ap.add_argument("--version", default="ecg")
-    ap.add_argument("--out", default=str(OUT_DIR))
+    ap.add_argument("--out", default=None, help="default: vas_meg_patterns (or vas_meg_patterns_self)")
     ap.add_argument("--n-factors", type=int, default=None)
     ap.add_argument("--n-boot", type=int, default=200)
     ap.add_argument("--skip-hmm", action="store_true")
@@ -684,9 +746,11 @@ def main():
     ap.add_argument("--max-states", type=int, default=MAX_STATES)
     ap.add_argument("--transform", choices=["rankint", "log", "raw"], default="rankint")
     a = ap.parse_args()
-    out = Path(a.out)
+    self_set = a.roi_set == "self"
+    out = Path(a.out) if a.out else OUT_DIR.parent / ("vas_meg_patterns_self" if self_set else OUT_DIR.name)
     out.mkdir(parents=True, exist_ok=True)
-    net = Path(a.net_dir)
+    net = Path(a.net_dir) if a.net_dir else NET_DIR.parent / ("vas_meg_self" if self_set else NET_DIR.name)
+    print(f"ROI set: {a.roi_set}; input {net}; output {out}")
     rng = np.random.default_rng(SEED)
     pd.set_option("display.width", 220)
 
@@ -706,7 +770,13 @@ def main():
     part2(T, Bm, models, out)
     part3(S, B, Bm, a.n_boot, rng, out)
     if not a.skip_hmm:
-        part4(load_module4(), models, Bm, a.static_glob, a.version, a.hmm_center, a.hmm_detrend,
+        m4 = load_module4()
+        if self_set:
+            spec = importlib.util.spec_from_file_location("v10", HERE / "10_vas_meg_networks.py")
+            v10 = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(v10)
+            m4.ROI_GROUPS = v10.SELF_GROUPS
+        part4(m4, models, Bm, a.static_glob, a.version, a.hmm_center, a.hmm_detrend,
               a.transform, a.max_states, rng, out)
     print(f"\noutputs in {out}")
 

@@ -57,6 +57,8 @@ OUTPUTS (OUT_DIR)
   V3_first_snippet_group.csv  H5 group test of the MEG first-snippet effect
 
 USAGE
+  python 10_vas_meg_networks.py                  # networks
+  python 10_vas_meg_networks.py --roi-set self   # interoceptive / exteroceptive / mental self
   python 10_vas_meg_networks.py --static-glob "/path/*static*.csv"
   options: --behav-dir DIR --out DIR --version ecg --n-boot 2000
            --noise-sd 2.0 (override the value taken from script 6)
@@ -94,6 +96,18 @@ MEG_MEASURES = {
     "spectral": ["Spec_lowhigh_8Hz", "MedianFreq", "IRASA_oscpower", "SpectralEntropy"],
 }
 ALL_MEASURES = [m for v in MEG_MEASURES.values() for m in v]
+
+# Three levels of self (KK regions, Qin et al. 2020 three-level model). Regions
+# belonging to two levels (InteroSelf_*, ExteroSelf_*) are left out, so the
+# three groups do not overlap. Use with --roi-set self.
+SELF_GROUPS = {
+    "Interoceptive": (r"^Intero_", r"$^"),
+    "Exteroceptive": (r"^Extero_", r"$^"),
+    "Mental_self": (r"^Self_", r"$^"),
+}
+# primary hypotheses in --roi-set self: network -> closest self level
+SELF_MAP = {"DMN": "Mental_self", "Salience_Interoceptive": "Interoceptive",
+            "Sensory_control": "Exteroceptive", "Frontoparietal": "Mental_self"}
 
 HYP = [
     dict(id="H1", label="presence: baseline share of non-zero ratings", kind="corr",
@@ -404,11 +418,20 @@ def main():
     ap.add_argument("--out", default=None, help="default: <behav-dir>/vas_meg_networks")
     ap.add_argument("--noise-sd", type=float, default=None)
     ap.add_argument("--n-boot", type=int, default=2000)
+    ap.add_argument("--roi-set", choices=["networks", "self"], default="networks",
+                    help="networks: DMN / salience / frontoparietal / sensory (default); "
+                         "self: interoceptive / exteroceptive / mental self (KK regions)")
     a = ap.parse_args()
     bdir = Path(a.behav_dir)
-    out = Path(a.out) if a.out else bdir / "vas_meg_networks"
+    default_out = "vas_meg_networks" if a.roi_set == "networks" else "vas_meg_self"
+    out = Path(a.out) if a.out else bdir / default_out
     out.mkdir(parents=True, exist_ok=True)
     m4 = load_module4()
+    if a.roi_set == "self":
+        m4.ROI_GROUPS = SELF_GROUPS
+        for h in HYP:
+            h["group"] = SELF_MAP.get(h["group"], h["group"])
+        print("ROI set: three levels of self " + str(list(SELF_GROUPS)))
     noise = pick_noise_sd(bdir, a.noise_sd)
     B, pair = load_behaviour(bdir, noise)
     B.to_csv(out / "V0_behaviour_table.csv", index=False)

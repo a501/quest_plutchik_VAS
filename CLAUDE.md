@@ -35,3 +35,11 @@
   quality or drowsiness measure.
 - Report mean_flip as the main source-extraction method; pca_flip results go
   to the supplement as a robustness check.
+
+# Deferred analyses (noted, not done yet)
+
+- HMM with real time between probes (13_meg_neural_patterns.py, part 4):
+  the current Gaussian HMM treats every probe as one step, although probe
+  intervals vary (20-60 s). Option for later: (1) test whether state
+  switches are more likely after longer intervals; (2) if so, a
+  continuous-time HMM (transition matrix exp(Q * dt) per interval).
