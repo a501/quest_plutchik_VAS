@@ -28,9 +28,8 @@ STEP 2  CONFOUNDS per subject x block (cached in C0_confounds.csv)
                                        outside 40-150 bpm -> NaN (failed detection)
           blink_rate_per_min           EOG channels (drowsiness / arousal)
         from {stem}_ica.fif: ica_n_components, ica_n_excluded (data quality)
-        from vas_probes_long.csv: timeout_rate (rating not confirmed) is
-                                  recorded but NOT used as a confound: an
-                                  unconfirmed rating is a valid rating
+        (Whether a VAS rating was confirmed is not used at all: an unconfirmed
+        rating is a valid rating, see CLAUDE.md.)
 STEP 3  TESTS (Spearman / rank-based partial correlations)
         C1  every PC x every confound, per block
         C2  every PC x every behavioural variable, per block
@@ -65,7 +64,6 @@ warnings.filterwarnings("ignore")
 
 BEHAV = Path("/home/ZhangJianfeng_04/emo_study/Behav")
 NET_DIR = BEHAV / "analysis" / "vas_meg_networks"          # outputs of 10_
-PROBES = BEHAV / "dynamics_models" / "vas_probes_long.csv"
 PREPROC = Path("/home/ZhangJianfeng_04/emo_study/MEG/3_preproc")
 OUT_DIR = BEHAV / "analysis" / "vas_meg_pc_confounds"
 
@@ -77,8 +75,6 @@ BEHAV_VARS = ["latent_sd", "mean", "frac_nonzero", "sd", "first_minus_rest"]
 CONFOUNDS = ["head_x_mm", "head_y_mm", "head_z_mm", "head_dist_mm",
              "meg_mag_rms_fT", "meg_grad_rms", "heart_rate_bpm", "blink_rate_per_min",
              "ica_n_components", "ica_n_excluded"]
-# timeout_rate (rating not confirmed) is still written to C0_confounds.csv but not
-# used: an unconfirmed rating is a valid rating in this study (see CLAUDE.md)
 HR_RANGE = (40.0, 150.0)       # bpm; outside = failed R-peak detection -> NaN
 RMS_WINDOW_S = 60.0
 
@@ -160,11 +156,6 @@ def load_confounds(out, refresh):
     C = pd.DataFrame(rows)
     if len(C):   # one row per subject x block (first file if a block was cut twice)
         C = C.drop_duplicates(["subj", "condition"])
-    d = pd.read_csv(PROBES, dtype={"subj": str})
-    d = d[d["subj"].astype(int) < 200]
-    to = (d.drop_duplicates(["subj", "condition", "probe_idx"])
-          .groupby(["subj", "condition"])["timeout"].mean().rename("timeout_rate").reset_index())
-    C = to.merge(C, on=["subj", "condition"], how="outer") if len(C) else to
     C.to_csv(cache, index=False)
     return C
 
