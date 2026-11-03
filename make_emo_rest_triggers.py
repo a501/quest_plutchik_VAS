@@ -134,11 +134,22 @@ def reconstruct_markers(path):
     """Per-sample composite marker value from the STI bit channels."""
     raw = mne.io.read_raw_fif(path, preload=False, verbose=False)
     sfreq = raw.info["sfreq"]
-    chans = [c for c in STI_CHANNELS if c in raw.ch_names]
+    # some recordings (e.g. 052) write channel names with a space: 'STI 001'
+    names = {c.replace(" ", ""): c for c in raw.ch_names}
+    chans = [c for c in STI_CHANNELS if c in names]
     if not chans:
-        raise RuntimeError(f"none of {STI_CHANNELS} present; "
-                           f"first channels: {raw.ch_names[:20]}")
-    sti, _ = raw[chans]
+        if "STI101" in names:
+            # composite channel: STIn contributes 2**(n-1). Keep the bits of
+            # STI001-STI006 and STI008 (mask 0b10111111 = 191, STI007 = 64 is
+            # ignored as in the bit-channel route); STI008 stays bit 7 = 128.
+            comp, _ = raw[names["STI101"]]
+            marker = np.clip(np.rint(comp[0]), 0, None).astype(np.int64) & 0b10111111
+            print(f"        {Path(path).name}: no STI001-STI008 - using composite STI101")
+            return marker.astype(int), sfreq, len(raw.filenames)
+        stim = [c for c in raw.ch_names if c.upper().startswith("STI")]
+        raise RuntimeError(f"none of {STI_CHANNELS} and no STI101 present; "
+                           f"stim-like channels: {stim or 'none'}")
+    sti, _ = raw[[names[c] for c in chans]]
     binary = (sti > THRESHOLD).astype(int)
     marker = np.zeros(sti.shape[1], dtype=int)
     for i, ch in enumerate(chans):
