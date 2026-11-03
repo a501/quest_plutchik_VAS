@@ -1,0 +1,113 @@
+base_drop,row,value,ci_low,ci_high,p_holm
+0,tau base Sadness,12.567095782282456,0.739092994180693,59.999999999999986,
+0,tau base Fear,3.89087860625652,1.0899745499715683,7.710340783122885,
+0,tau sad Sadness,10.336425635505384,3.5287054717416533,24.903524612598968,
+0,tau sad Fear,59.999999999999986,4.73055636893465,59.999999999999986,
+0,tau fear Sadness,18.5765048997654,5.751442238183468,59.999999999999986,
+0,tau fear Fear,5.216082985382667,3.2002443577337747,8.501701329352652,
+0,A decline > 0 | base Sadness | decline,0.8457473502420967,,,1.0
+0,A decline > 0 | base Fear | decline,6.025389169503001,,,0.14973369734913844
+0,A decline > 0 | sad Sadness | decline,11.952560664973303,,,0.008568432973095511
+0,A decline > 0 | sad Fear | decline,1.8248491504221,,,1.0
+0,A decline > 0 | fear Sadness | decline,1.9765263699684061,,,1.0
+0,A decline > 0 | fear Fear | decline,20.98197420865956,,,0.00030353051518746034
+0,B induced vs other scale | sad: Sadness - Fear | decline,10.127711514551201,,,0.0009209450269133683
+0,C video vs baseline (order-confounded) | Sadness: sad - base | decline,10.819549244789348,,,0.035965278081395616
+0,B induced vs other scale | sad: Sadness - Fear | start,11.741459173235597,,,1.186227987991723e-05
+0,C video vs baseline (order-confounded) | Sadness: sad - base | start,8.55112721437433,,,0.08516608021390541
+0,B induced vs other scale | sad: Sadness - Fear | end,1.6137476586843953,,,0.24453077400979348
+0,C video vs baseline (order-confounded) | Sadness: sad - base | end,-2.2684220304150164,,,0.47313938704552894
+0,B induced vs other scale | fear: Fear - Sadness | decline,19.00544783869115,,,0.0003261330010992669
+0,C video vs baseline (order-confounded) | Fear: fear - base | decline,14.948923357681444,,,0.026463412251533654
+0,B induced vs other scale | fear: Fear - Sadness | start,14.05852895027654,,,0.001449624372575271
+0,C video vs baseline (order-confounded) | Fear: fear - base | start,14.647781965673252,,,0.026463412251533654
+0,B induced vs other scale | fear: Fear - Sadness | end,-4.946918888414614,,,0.05939940119912983
+0,C video vs baseline (order-confounded) | Fear: fear - base | end,-0.30114139200819445,,,0.869782854036338
+0,D carry-over (after other video vs before) | Fear in sad block: 3rd - 2nd | start,1.5356957174031436,,,1.0
+0,D carry-over (after other video vs before) | Fear in sad block: 3rd - 2nd | end,1.4957869186207589,,,1.0
+0,D carry-over (after other video vs before) | Sadness in fear block: 3rd - 2nd | start,-10.334195245752346,,,0.4606299361426761
+0,D carry-over (after other video vs before) | Sadness in fear block: 3rd - 2nd | end,-1.513580674454932,,,1.0
+1,tau base Sadness,59.999999999999986,6.3269910996749035,59.999999999999986,
+1,tau base Fear,3.89087860625652,2.9023572613874067,15.318364439176275,
+1,tau sad Sadness,10.336425635505384,3.5287054717416533,24.903524612598968,
+1,tau sad Fear,59.999999999999986,4.73055636893465,59.999999999999986,
+1,tau fear Sadness,18.5765048997654,5.751442238183468,59.999999999999986,
+1,tau fear Fear,5.216082985382667,3.2002443577337747,8.501701329352652,
+1,A decline > 0 | base Sadness | decline,-3.9152018358233267,,,0.3618575006657478
+1,A decline > 0 | base Fear | decline,3.7228516328684957,,,1.0
+1,A decline > 0 | sad Sadness | decline,11.952560664973303,,,0.008568432973095511
+1,A decline > 0 | sad Fear | decline,1.8248491504221,,,1.0
+1,A decline > 0 | fear Sadness | decline,1.9765263699684061,,,1.0
+1,A decline > 0 | fear Fear | decline,20.98197420865956,,,0.00030353051518746034
+1,B induced vs other scale | sad: Sadness - Fear | decline,10.127711514551201,,,0.0009209450269133683
+1,C video vs baseline (order-confounded) | Sadness: sad - base | decline,15.58049843085477,,,0.002752742756560224
+1,B induced vs other scale | sad: Sadness - Fear | start,11.741459173235597,,,1.186227987991723e-05
+1,C video vs baseline (order-confounded) | Sadness: sad - base | start,11.716438821718542,,,0.016202008725580835
+1,B induced vs other scale | sad: Sadness - Fear | end,1.6137476586843953,,,0.24453077400979348
+1,C video vs baseline (order-confounded) | Sadness: sad - base | end,-3.8640596091362305,,,0.09969596466751504
+1,B induced vs other scale | fear: Fear - Sadness | decline,19.00544783869115,,,0.0003261330010992669
+1,C video vs baseline (order-confounded) | Fear: fear - base | decline,17.251460894315954,,,0.016202008725580835
+1,B induced vs other scale | fear: Fear - Sadness | start,14.05852895027654,,,0.001449624372575271
+1,C video vs baseline (order-confounded) | Fear: fear - base | start,16.49958003258834,,,0.01664790692167256
+1,B induced vs other scale | fear: Fear - Sadness | end,-4.946918888414614,,,0.05939940119912983
+1,C video vs baseline (order-confounded) | Fear: fear - base | end,-0.7518808617276106,,,0.6786342204804521
+1,D carry-over (after other video vs before) | Fear in sad block: 3rd - 2nd | start,1.5356957174031436,,,1.0
+1,D carry-over (after other video vs before) | Fear in sad block: 3rd - 2nd | end,1.4957869186207589,,,1.0
+1,D carry-over (after other video vs before) | Sadness in fear block: 3rd - 2nd | start,-10.334195245752346,,,0.4606299361426761
+1,D carry-over (after other video vs before) | Sadness in fear block: 3rd - 2nd | end,-1.513580674454932,,,1.0
+2,tau base Sadness,59.999999999999986,7.710340783122885,59.999999999999986,
+2,tau base Fear,4.290223837001788,2.6321982733510265,59.999999999999986,
+2,tau sad Sadness,10.336425635505384,3.2002443577337747,27.45952925555984,
+2,tau sad Fear,59.999999999999986,4.73055636893465,59.999999999999986,
+2,tau fear Sadness,18.5765048997654,5.216082985382667,59.999999999999986,
+2,tau fear Fear,5.216082985382667,3.2002443577337747,8.501701329352652,
+2,A decline > 0 | base Sadness | decline,-5.268688405620644,,,0.11006160598613957
+2,A decline > 0 | base Fear | decline,-1.66451946594714,,,1.0
+2,A decline > 0 | sad Sadness | decline,11.952560664973303,,,0.008568432973095511
+2,A decline > 0 | sad Fear | decline,1.8248491504221,,,1.0
+2,A decline > 0 | fear Sadness | decline,1.9765263699684061,,,1.0
+2,A decline > 0 | fear Fear | decline,20.98197420865956,,,0.00030353051518746034
+2,B induced vs other scale | sad: Sadness - Fear | decline,10.127711514551201,,,0.0009209450269133683
+2,C video vs baseline (order-confounded) | Sadness: sad - base | decline,16.543645324966576,,,0.0015170577639632716
+2,B induced vs other scale | sad: Sadness - Fear | start,11.741459173235597,,,1.186227987991723e-05
+2,C video vs baseline (order-confounded) | Sadness: sad - base | start,12.932742347937088,,,0.005283170409764875
+2,B induced vs other scale | sad: Sadness - Fear | end,1.6137476586843953,,,0.24453077400979348
+2,C video vs baseline (order-confounded) | Sadness: sad - base | end,-3.6109029770294883,,,0.1025587080310959
+2,B induced vs other scale | fear: Fear - Sadness | decline,19.00544783869115,,,0.0003261330010992669
+2,C video vs baseline (order-confounded) | Fear: fear - base | decline,21.30206380592946,,,0.0015170577639632716
+2,B induced vs other scale | fear: Fear - Sadness | start,14.05852895027654,,,0.001449624372575271
+2,C video vs baseline (order-confounded) | Fear: fear - base | start,20.847558214179127,,,0.0015170577639632716
+2,B induced vs other scale | fear: Fear - Sadness | end,-4.946918888414614,,,0.05939940119912983
+2,C video vs baseline (order-confounded) | Fear: fear - base | end,-0.4545055917503322,,,0.7986959027142642
+2,D carry-over (after other video vs before) | Fear in sad block: 3rd - 2nd | start,1.5356957174031436,,,1.0
+2,D carry-over (after other video vs before) | Fear in sad block: 3rd - 2nd | end,1.4957869186207589,,,1.0
+2,D carry-over (after other video vs before) | Sadness in fear block: 3rd - 2nd | start,-10.334195245752346,,,0.4606299361426761
+2,D carry-over (after other video vs before) | Sadness in fear block: 3rd - 2nd | end,-1.513580674454932,,,1.0
+3,tau base Sadness,27.45952925555984,3.89087860625652,59.999999999999986,
+3,tau base Fear,3.5287054717416533,2.387186388942389,59.999999999999986,
+3,tau sad Sadness,10.336425635505384,3.2002443577337747,27.45952925555984,
+3,tau sad Fear,59.999999999999986,4.73055636893465,59.999999999999986,
+3,tau fear Sadness,18.5765048997654,5.216082985382667,59.999999999999986,
+3,tau fear Fear,5.216082985382667,3.2002443577337747,8.501701329352652,
+3,A decline > 0 | base Sadness | decline,-6.306841952579361,,,0.07368049080916024
+3,A decline > 0 | base Fear | decline,-4.1382754980759815,,,0.9656411641956487
+3,A decline > 0 | sad Sadness | decline,11.952560664973303,,,0.008568432973095511
+3,A decline > 0 | sad Fear | decline,1.8248491504221,,,0.9656411641956487
+3,A decline > 0 | fear Sadness | decline,1.9765263699684061,,,0.9656411641956487
+3,A decline > 0 | fear Fear | decline,20.98197420865956,,,0.00030353051518746034
+3,B induced vs other scale | sad: Sadness - Fear | decline,10.127711514551201,,,0.0009209450269133683
+3,C video vs baseline (order-confounded) | Sadness: sad - base | decline,17.581798871925294,,,0.0008124202567275765
+3,B induced vs other scale | sad: Sadness - Fear | start,11.741459173235597,,,1.186227987991723e-05
+3,C video vs baseline (order-confounded) | Sadness: sad - base | start,13.883725912389577,,,0.003195035448150984
+3,B induced vs other scale | sad: Sadness - Fear | end,1.6137476586843953,,,0.24453077400979348
+3,C video vs baseline (order-confounded) | Sadness: sad - base | end,-3.6980729595357187,,,0.0922574119053524
+3,B induced vs other scale | fear: Fear - Sadness | decline,19.00544783869115,,,0.0003261330010992669
+3,C video vs baseline (order-confounded) | Fear: fear - base | decline,23.775819838058297,,,0.0008124202567275765
+3,B induced vs other scale | fear: Fear - Sadness | start,14.05852895027654,,,0.001449624372575271
+3,C video vs baseline (order-confounded) | Fear: fear - base | start,23.21091815721047,,,0.0008124202567275765
+3,B induced vs other scale | fear: Fear - Sadness | end,-4.946918888414614,,,0.05939940119912983
+3,C video vs baseline (order-confounded) | Fear: fear - base | end,-0.5649016808478303,,,0.7514408469391229
+3,D carry-over (after other video vs before) | Fear in sad block: 3rd - 2nd | start,1.5356957174031436,,,1.0
+3,D carry-over (after other video vs before) | Fear in sad block: 3rd - 2nd | end,1.4957869186207589,,,1.0
+3,D carry-over (after other video vs before) | Sadness in fear block: 3rd - 2nd | start,-10.334195245752346,,,0.4606299361426761
+3,D carry-over (after other video vs before) | Sadness in fear block: 3rd - 2nd | end,-1.513580674454932,,,1.0
