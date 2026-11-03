@@ -460,6 +460,9 @@ for entry in MEG:
         plt.close('all')
 
         # --- Save ICA solution ---
+        # record which components were removed (EOG + ECG), so the saved ICA
+        # file documents the cleaning; the data files above are already cleaned
+        ica.exclude = sorted(set(eog_indices + ecg_indices))
         ica.save(out_ica, overwrite=True, verbose=False)
         print(f"ICA solution saved: {out_ica}")
 

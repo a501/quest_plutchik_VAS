@@ -22,11 +22,15 @@ STEP 2  CONFOUNDS per subject x block (cached in C0_confounds.csv)
                                        (dev_head_t): position in the helmet,
                                        distance to the sensors
           meg_mag_rms_fT, meg_grad_rms  broadband signal size (noise / SNR)
-          heart_rate_bpm               ECG channel, R-peaks (arousal)
+          heart_rate_bpm               ECG channel: R-peaks detected by
+                                       mne.preprocessing.find_ecg_events,
+                                       divided by the block length in minutes;
+                                       outside 40-150 bpm -> NaN (failed detection)
           blink_rate_per_min           EOG channels (drowsiness / arousal)
         from {stem}_ica.fif: ica_n_components, ica_n_excluded (data quality)
-        from vas_probes_long.csv: timeout_rate (missed ratings: drowsiness /
-                                  disengagement)
+        from vas_probes_long.csv: timeout_rate (rating not confirmed) is
+                                  recorded but NOT used as a confound: an
+                                  unconfirmed rating is a valid rating
 STEP 3  TESTS (Spearman / rank-based partial correlations)
         C1  every PC x every confound, per block
         C2  every PC x every behavioural variable, per block
@@ -72,7 +76,10 @@ COND = {"base": "baseline", "sad": "sad", "fear": "fear"}
 BEHAV_VARS = ["latent_sd", "mean", "frac_nonzero", "sd", "first_minus_rest"]
 CONFOUNDS = ["head_x_mm", "head_y_mm", "head_z_mm", "head_dist_mm",
              "meg_mag_rms_fT", "meg_grad_rms", "heart_rate_bpm", "blink_rate_per_min",
-             "ica_n_components", "ica_n_excluded", "timeout_rate"]
+             "ica_n_components", "ica_n_excluded"]
+# timeout_rate (rating not confirmed) is still written to C0_confounds.csv but not
+# used: an unconfirmed rating is a valid rating in this study (see CLAUDE.md)
+HR_RANGE = (40.0, 150.0)       # bpm; outside = failed R-peak detection -> NaN
 RMS_WINDOW_S = 60.0
 
 
@@ -109,7 +116,10 @@ def meg_confounds(path):
         try:
             e = raw.copy().pick(ecg[:1]).load_data()
             ev, _, _ = mne.preprocessing.find_ecg_events(e, ch_name=ecg[0], verbose=False)
-            r["heart_rate_bpm"] = len(ev) / dur_min
+            hr = len(ev) / dur_min
+            r["heart_rate_bpm"] = hr if HR_RANGE[0] <= hr <= HR_RANGE[1] else np.nan
+            if not HR_RANGE[0] <= hr <= HR_RANGE[1]:
+                print(f"    heart rate {hr:.0f} bpm implausible (failed R-peak detection) -> NaN")
         except Exception as ex:
             print(f"    ECG failed: {ex}")
     eog = [c for c in info["ch_names"] if "EOG" in c.upper()]

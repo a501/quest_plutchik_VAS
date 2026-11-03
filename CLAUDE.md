@@ -25,3 +25,13 @@
   ```
 
   Without the export, python3 is the system Python and mne is missing.
+
+# Data conventions
+
+- VAS ratings: it does NOT matter whether a participant pressed "confirm".
+  An unconfirmed (timed-out) rating is a valid rating (the slider position
+  at the timeout). Do not treat unconfirmed ratings as missing, do not
+  exclude people for them, and do not use the confirm/timeout rate as a
+  quality or drowsiness measure.
+- Report mean_flip as the main source-extraction method; pca_flip results go
+  to the supplement as a robustness check.
